@@ -1,5 +1,5 @@
 """
-╔══════════════════════════════════════════════════════════╗
+╔══════════════════════════ ════ ════════════════════════════════╗
 ║         Quantitative Trading Bot  —  Version V10.8          ║
 ║      Fixes + Hedge-Fund-Grade New Features                  ║
 ╠══════════════════════════════════════════════════════════════╣
@@ -1640,9 +1640,7 @@ def try_enter(symbol: str) -> bool:
 
     q   = state["quotes"][symbol]
     ask = q["ask"]
-    # FIX V10.8: use relaxed spread limit for IEX feed
-    effective_spread_max = MAX_SPREAD_PCT * (5.0 if DATA_FEED == "iex" else 1.0)
-    if q["spread_pct"] > effective_spread_max:
+    if q["spread_pct"] > MAX_SPREAD_PCT:
         return False
     if not predict_spread_ok(symbol):
         return False
