@@ -2,7 +2,7 @@
 ╔══════════════════════════════════════════════════════════════╗
 ║         Quantitative Trading Bot  —  Version V10.5          ║
 ║      Fixes + Hedge-Fund-Grade New Features                  ║
-╠══════════════════════════════════════════════════════════════╣
+╠═════════════════════════════════════════════════════════════╣
 ║  Fixes:                                                     ║
 ║  ✅ Quote Frequency Counter  — correct per-minute reset      ║
 ║  ✅ Logistic Regression      — tuned C + class_weight        ║
