@@ -2536,12 +2536,16 @@ async def market_data_ws():
                 while True:
                     new_syms = sorted(set(state["scanner_candidates"] + ["SPY"]))
                     if new_syms and new_syms != last_subscribed:
-                        # only reconnect if 5+ symbols changed — avoids constant churn
-                        added   = set(new_syms) - set(last_subscribed)
-                        removed = set(last_subscribed) - set(new_syms)
-                        if len(added) + len(removed) >= 5:
-                            log("Candidate list changed — reconnecting market stream...")
-                            break
+                        # FIX V12.4a: skip reconnect when market closed — list is unstable at startup
+                        if not market_is_open():
+                            last_subscribed = new_syms
+                        else:
+                            # only reconnect if 5+ symbols changed — avoids constant churn
+                            added   = set(new_syms) - set(last_subscribed)
+                            removed = set(last_subscribed) - set(new_syms)
+                            if len(added) + len(removed) >= 5:
+                                log("Candidate list changed — reconnecting market stream...")
+                                break
 
                     raw = await asyncio.wait_for(ws.recv(), timeout=30)
                     if isinstance(raw, bytes):
