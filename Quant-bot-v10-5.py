@@ -1826,8 +1826,16 @@ async def market_data_ws():
                 while True:
                     new_syms = sorted(set(state["scanner_candidates"] + ["SPY"]))
                     if new_syms and new_syms != last_subscribed:
-                        log("Candidate list changed — reconnecting market stream...")
-                        break
+                         # only reconnect if candidates changed significantly (5+ new symbols)  
+                         new_set  = set(new_syms)
+                         old_set  = set(last_subscribed)
+                         added    = new_set - old_set
+                         removed  = old_set - new_set
+                         if len(added) + len(removed) >= 5:
+                             log("Candidate list changed — reconnecting market stream...")
+                             break
+      
+   
 
                     raw = await asyncio.wait_for(ws.recv(), timeout=30)
                     if isinstance(raw, bytes):
