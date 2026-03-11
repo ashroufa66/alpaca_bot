@@ -10,8 +10,8 @@
 ║  ✅ Regime Drift Protection  — retrain on regime change    ║
 ║  ✅ Flash Crash Protection   — detect and freeze instantly ║
 ║  ✅ IEX Limitation Warnings  — data accuracy alerts        ║
-║                                                             ║
-║  New Features:                                              ║
+║                                                            ║
+║  New Features:                                             ║
 ║  ✨ Kelly Fraction Position Sizing                          ║
 ║  ✨ VWAP Mean-Reversion AI Model                            ║
 ║  ✨ Dynamic Scanner (Volume Leaders)                        ║
