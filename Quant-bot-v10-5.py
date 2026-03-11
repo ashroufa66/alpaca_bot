@@ -1,15 +1,15 @@
 """
-╔════════════════════════════════════════    ════════════  ════════╗
-║         Quantitative Trading Bot  —  Version V10.5          ║
-║      Fixes + Hedge-Fund-Grade New Features                  ║
-╠═════════════════════════════════════════════════════════════╣
-║  Fixes:                                                     ║
-║  ✅ Quote Frequency Counter  — correct per-minute reset     ║
-║  ✅ Logistic Regression      — tuned C + class_weight       ║
-║  ✅ AI Feature Clipping      — outlier protection           ║
-║  ✅ Regime Drift Protection  — retrain on regime change     ║
-║  ✅ Flash Crash Protection   — detect and freeze instantly  ║
-║  ✅ IEX Limitation Warnings  — data accuracy alerts         ║
+╔════════════════════════════════════════════════════════════╗
+║         Quantitative Trading Bot  —  Version V10.5         ║
+║      Fixes + Hedge-Fund-Grade New Features                 ║
+╠════════════════════════════════════════════════════════════╣
+║  Fixes:                                                    ║
+║  ✅ Quote Frequency Counter  — correct per-minute reset    ║
+║  ✅ Logistic Regression      — tuned C + class_weight      ║
+║  ✅ AI Feature Clipping      — outlier protection          ║
+║  ✅ Regime Drift Protection  — retrain on regime change    ║
+║  ✅ Flash Crash Protection   — detect and freeze instantly ║
+║  ✅ IEX Limitation Warnings  — data accuracy alerts        ║
 ║                                                             ║
 ║  New Features:                                              ║
 ║  ✨ Kelly Fraction Position Sizing                          ║
