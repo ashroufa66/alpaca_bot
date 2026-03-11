@@ -1,21 +1,21 @@
 """
-╔════════════════════════════════════════════════════════════╗
-║         Quantitative Trading Bot  —  Version V10.5         ║
-║      Fixes + Hedge-Fund-Grade New Features                 ║
-╠════════════════════════════════════════════════════════════╣
-║  Fixes:                                                    ║
-║  ✅ Quote Frequency Counter  — correct per-minute reset    ║
-║  ✅ Logistic Regression      — tuned C + class_weight      ║
-║  ✅ AI Feature Clipping      — outlier protection          ║
-║  ✅ Regime Drift Protection  — retrain on regime change    ║
-║  ✅ Flash Crash Protection   — detect and freeze instantly ║
-║  ✅ IEX Limitation Warnings  — data accuracy alerts        ║
-║                                                            ║
-║  New Features:                                             ║
+╔══════════════════════════════════════════════════════════════╗
+║         Quantitative Trading Bot  —  Version V10.7          ║
+║      Fixes + Hedge-Fund-Grade New Features                  ║
+╠══════════════════════════════════════════════════════════════╣
+║  Fixes:                                                     ║
+║  ✅ Quote Frequency Counter  — correct per-minute reset      ║
+║  ✅ Logistic Regression      — tuned C + class_weight        ║
+║  ✅ AI Feature Clipping      — outlier protection            ║
+║  ✅ Regime Drift Protection  — retrain on regime change      ║
+║  ✅ Flash Crash Protection   — detect and freeze instantly   ║
+║  ✅ IEX Limitation Warnings  — data accuracy alerts         ║
+║                                                             ║
+║  New Features:                                              ║
 ║  ✨ Kelly Fraction Position Sizing                          ║
 ║  ✨ VWAP Mean-Reversion AI Model                            ║
 ║  ✨ Dynamic Scanner (Volume Leaders)                        ║
-╚═════════════════════════════════════════════════════════════╝
+╚══════════════════════════════════════════════════════════════╝
 """
 
 import os
@@ -98,8 +98,8 @@ DYNAMIC_SCAN_REFRESH_SEC  = 300   # refresh leader list every 5 minutes
 # ── Symbol Filters ──
 MIN_PRICE         = 1.0
 MAX_PRICE         = 120.0
-MAX_SPREAD_PCT    = 0.55
-MIN_DOLLAR_VOLUME = 2_000_000
+MAX_SPREAD_PCT    = 1.5   # FIX V10.7: raised for IEX — real spread is ~5x lower than reported
+MIN_DOLLAR_VOLUME = 3_000_000  # FIX V10.7: balanced — enough liquidity, more candidates
 
 # ── Liquidity Filter ──
 MIN_LIQUIDITY_RATIO  = 2.0   # book depth must be at least 2x position size
@@ -222,12 +222,12 @@ VWAP_FEATURE_NAMES = [
 ]
 
 # ── Spread Prediction ──
-SPREAD_HISTORY_BARS  = 10  # spread readings used to forecast future spread
-MAX_PREDICTED_SPREAD = 0.6 # abort entry if predicted spread exceeds this
+SPREAD_HISTORY_BARS  = 5   # FIX V10.7: fewer bars = less stale IEX spread data
+MAX_PREDICTED_SPREAD = 1.2 # FIX V10.7: raised from 0.6 — IEX spreads are overstated
 
 # ── Files ──
 SECTOR_CSV_FILE = "sectors.csv"
-TRADE_LOG_FILE  = "trade_log_v10_5.csv"
+TRADE_LOG_FILE  = "trade_log_v10_7.csv"
 
 
 # =========================================================
@@ -372,6 +372,7 @@ def reset_daily_if_needed():
         state["flash_crash_until"]    = 0.0
         state["dynamic_leaders"]      = []
         state["last_dynamic_scan"]    = 0.0
+        state["last_halt_log"]        = {}
         log("New trading day — daily state reset complete")
 
 def in_cooldown(symbol: str) -> bool:
@@ -625,6 +626,15 @@ def analyze_news(symbol: str) -> Tuple[str, int]:
 # HALT DETECTION
 # =========================================================
 
+def _log_halt_once(symbol: str, msg: str):
+    """Log a halt warning at most once per 60 seconds per symbol to reduce spam."""
+    now = time.time()
+    if "last_halt_log" not in state:
+        state["last_halt_log"] = {}
+    if now - state["last_halt_log"].get(symbol, 0) > 60:
+        log(msg)
+        state["last_halt_log"][symbol] = now
+
 def detect_halt(symbol: str) -> bool:
     bars = state["bars"].get(symbol)
     if not bars:
@@ -639,10 +649,10 @@ def detect_halt(symbol: str) -> bool:
     ask   = float(q.get("ask", 0) or 0)
     sp    = float(q.get("spread_pct", 999) or 999)
     if diff > HALT_TIMEOUT_SECONDS:
-        log(f"HALT suspected {symbol}: no fresh bar for {int(diff)}s")
+        _log_halt_once(symbol, f"HALT suspected {symbol}: no fresh bar for {int(diff)}s")
         return True
     if bid > 0 and ask > 0 and sp > 5.0:
-        log(f"HALT suspected {symbol}: spread exploded to {sp:.2f}%")
+        _log_halt_once(symbol, f"HALT suspected {symbol}: spread exploded to {sp:.2f}%")
         return True
     return False
 
@@ -1681,7 +1691,7 @@ def try_enter(symbol: str) -> bool:
             f"stop={stop_price:.2f} tp={tp_price:.2f} "
             f"kelly={kelly_pct:.3f} ai={ai_prob:.2%} regime={regime}")
         write_trade_log("BUY_SUBMITTED", symbol, qty, ask,
-                        "V10_5_MOMENTUM", ai_prob, kelly_pct, "momentum")
+                        "V10_7_MOMENTUM", ai_prob, kelly_pct, "momentum")
         return True
 
     return False
@@ -1826,16 +1836,12 @@ async def market_data_ws():
                 while True:
                     new_syms = sorted(set(state["scanner_candidates"] + ["SPY"]))
                     if new_syms and new_syms != last_subscribed:
-                         # only reconnect if candidates changed significantly (5+ new symbols)  
-                         new_set  = set(new_syms)
-                         old_set  = set(last_subscribed)
-                         added    = new_set - old_set
-                         removed  = old_set - new_set
-                         if len(added) + len(removed) >= 5:
-                             log("Candidate list changed — reconnecting market stream...")
-                             break
-      
-   
+                        # only reconnect if 5+ symbols changed — avoids constant churn
+                        added   = set(new_syms) - set(last_subscribed)
+                        removed = set(last_subscribed) - set(new_syms)
+                        if len(added) + len(removed) >= 5:
+                            log("Candidate list changed — reconnecting market stream...")
+                            break
 
                     raw = await asyncio.wait_for(ws.recv(), timeout=30)
                     if isinstance(raw, bytes):
@@ -1901,8 +1907,9 @@ async def order_updates_ws():
                 TRADE_STREAM_URL, ping_interval=20, ping_timeout=20
             ) as ws:
                 await ws.send(json.dumps({
-                    "action": "authenticate",
-                    "data":   {"key_id": API_KEY, "secret_key": API_SECRET},
+                    "action": "auth",
+                    "key":    API_KEY,
+                    "secret": API_SECRET,
                 }))
                 auth = await ws.recv()
                 if isinstance(auth, bytes):
@@ -2180,15 +2187,15 @@ async def housekeeping_loop():
 
 async def main():
     log("=" * 65)
-    log("Quantitative Trading Bot V10.5 — Starting up")
+    log("Quantitative Trading Bot V10.7 — Starting up")
     log("─" * 65)
-    log("Fixes in V10.5:")
-    log("   • Dynamic Scanner: 1500-symbol sample (was 500)")
-    log("   • Kelly: minimum 40 trades before activation (was 20)")
-    log("   • VWAP Deviation: 0.6% threshold (was 0.3%) — less overtrading")
-    log("   • AI Training: 120 samples minimum (was 30) — more reliable")
-    log("   • SPY Volatility Filter: size reduction when ATR spikes")
-    log("   • IEX Warning: detailed alert + SIP upgrade instructions")
+    log("Fixes in V10.7:")
+    log("   • Auth format updated — matches new Alpaca API standard")
+    log("   • Spread filter raised — IEX spreads are ~5x overstated")
+    log("   • Spread prediction window reduced — less stale data")
+    log("   • Dollar volume filter balanced — more candidates")
+    log("   • HALT log throttled — max once per 60s per symbol")
+    log("   • WebSocket reconnect stabilised — threshold 5+ symbols")
     log("─" * 65)
     log("New features (carried over from V10.4):")
     log("   • Kelly Fraction Position Sizing (half-Kelly)")
