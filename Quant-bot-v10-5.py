@@ -1829,7 +1829,7 @@ async def market_data_ws():
                         log("Candidate list changed — reconnecting market stream...")
                         break
 
-                    raw = await asyncio.wait_for(ws.recv(), timeout=15)
+                    raw = await asyncio.wait_for(ws.recv(), timeout=30)
                     if isinstance(raw, bytes):
                         raw = raw.decode("utf-8", errors="ignore")
                     data = json.loads(raw)
