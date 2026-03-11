@@ -15,7 +15,7 @@
 ║  ✨ Kelly Fraction Position Sizing                          ║
 ║  ✨ VWAP Mean-Reversion AI Model                            ║
 ║  ✨ Dynamic Scanner (Volume Leaders)                        ║
-╚══════════════════════════════════════════════════════════════╝
+╚═════════════════════════════════════════════════════════════╝
 """
 
 import os
