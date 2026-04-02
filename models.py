@@ -168,10 +168,20 @@ def ai_record_outcome(symbol: str, pnl: float):
     # V16.5: single kelly save (was duplicate — called once here, once after)
     supa_save_kelly(pnl > 0, pnl_r)
 
-    # AI training sample — only save when we have real entry features
+    # AI training sample — save even for restored positions using price fallback
     if not features:
-        log(f"[AI] No features for {symbol} (restored position) — kelly saved, AI sample skipped")
-        return
+        # V19.0: build minimal features from current price data
+        # Better than skipping — gives AI training signal even for old positions
+        _pos = state["positions"].get(symbol, {})
+        _entry = _pos.get("entry_price", 1.0) or 1.0
+        _atr   = _pos.get("atr_at_entry", 0.01) or 0.01
+        _qty   = int(_pos.get("qty", 1) or 1)
+        features = [
+            float(pnl / (_entry * _qty)) if _entry * _qty > 0 else 0.0,  # return %
+            float(_atr / _entry) if _entry > 0 else 0.0,                  # atr %
+            1.0 if pnl > 0 else 0.0,                                       # win flag
+        ]
+        log(f"[AI] {symbol}: using price fallback features (restored pos) — kelly + AI saved")
 
     state["ai_train_data"].append({"features": features, "label": label})
     supa_save_trade(symbol, features, label, pnl)
@@ -484,8 +494,9 @@ def calc_kelly_fraction() -> float:
     kelly = max(kelly, 0.0)
 
     # Negative Kelly guard — floor at 0.5% so positions remain tradeable
-    if kelly <= 0.005:
-        return max(ACCOUNT_RISK_PCT * 0.50, 0.005)
+    if kelly <= KELLY_MIN_FLOOR:
+        # V18.9: use KELLY_MIN_FLOOR from config — prevents positions shrinking to dust
+        return max(ACCOUNT_RISK_PCT, KELLY_MIN_FLOOR)
 
     # Half-Kelly with hard cap for safety
     half_kelly = kelly * KELLY_FRACTION
