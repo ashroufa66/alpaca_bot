@@ -28,7 +28,7 @@ from indicators import minutes_since_market_open
 # Survives Railway redeployments and code updates
 # =========================================================
 
-def _supa_request(method: str, table: str, data: dict = None, params: str = "") -> dict:
+def _supa_request(method: str, table: str, data: dict = None, params: str = "", upsert: bool = False) -> dict:
     """Low-level Supabase REST API call using stdlib only."""
     if not SUPABASE_ENABLED:
         return {}
@@ -41,7 +41,9 @@ def _supa_request(method: str, table: str, data: dict = None, params: str = "") 
         req.add_header("apikey",        _write_key)
         req.add_header("Authorization", f"Bearer {_write_key}")
         req.add_header("Content-Type",  "application/json")
-        req.add_header("Prefer",        "return=minimal")
+        # V19.0: UPSERT support — overwrite on conflict instead of 409 error
+        prefer = "resolution=merge-duplicates,return=minimal" if upsert else "return=minimal"
+        req.add_header("Prefer", prefer)
         with urllib.request.urlopen(req, timeout=10) as resp:
             raw = resp.read()
             return json.loads(raw) if raw else {}
@@ -109,6 +111,7 @@ def supa_save_open_position(symbol: str, entry_price: float, qty: int,
     This is the fix for ai_trades always being empty after restarts.
     """
     if not SUPABASE_ENABLED: return
+    # V19.0: UPSERT — fixes HTTP 409 duplicate key on re-buy same symbol
     _supa_request("POST", "open_positions", {
         "symbol":         symbol,
         "entry_price":    round(entry_price, 4),
@@ -120,7 +123,7 @@ def supa_save_open_position(symbol: str, entry_price: float, qty: int,
         "entry_features": json.dumps(entry_features),
         "ai_prob":        round(float(ai_prob), 4),
         "ts":             int(time.time()),
-    })
+    }, upsert=True)
 
 def supa_delete_open_position(symbol: str):
     """
