@@ -3,7 +3,7 @@ config.py — All configuration constants and environment variables.
 Single source of truth for every tunable parameter.
 Import pattern: from config import *
 """
-MODULE_VERSION = "V18.9"
+MODULE_VERSION = "V19.0"
 # V18.7 additions:
 #   1. Adaptive circuit breaker thresholds (normal=10, volatile=15)
 #   2. Equity trailing stop system (EQUITY_TRAIL_*)
@@ -100,6 +100,7 @@ ACCOUNT_RISK_PCT = 0.010 if TRADING_MODE == "paper" else 0.007
 # ── Kelly Sizing ───────────────────────────────────────────
 KELLY_FRACTION         = 0.25
 KELLY_MIN_SAMPLES      = 10
+KELLY_MIN_FLOOR        = 0.010  # V18.9: 1% min risk regardless of loss history
 KELLY_MAX_POSITION_PCT = 0.10 if TRADING_MODE == "paper" else 0.05
 
 # ── Adaptive Stops ─────────────────────────────────────────
