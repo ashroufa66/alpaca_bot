@@ -125,7 +125,7 @@ SLIPPAGE_IEX_MULT    = 0.4
 # ── Timing ─────────────────────────────────────────────────
 COOLDOWN_SECONDS                = 45 * 60
 REENTRY_BLOCK_MINUTES           = 90
-HALT_TIMEOUT_SECONDS            = 300
+HALT_TIMEOUT_SECONDS            = 900   # V19.0: raised from 300s — prefetch bars can be 30min old
 MARKET_OPEN_DELAY_MINUTES       = 8
 FORCE_EXIT_BEFORE_CLOSE_MINUTES = 10
 
