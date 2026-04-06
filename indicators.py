@@ -1,7 +1,7 @@
 """
 indicators.py — Technical indicators, scanner logic, market regime.
 """
-MODULE_VERSION = "V18.9"
+MODULE_VERSION = "V19.1"
 import os, json, time, math, asyncio, random, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -95,19 +95,89 @@ def _log_halt_once(symbol: str, msg: str):
         log(msg)
         state["last_halt_log"][symbol] = now
 
+def _trading_seconds_since(last_bar_time: pd.Timestamp) -> float:
+    """
+    V19.1: Compute elapsed *trading* time (seconds) since last_bar_time,
+    ignoring weekends, holidays, and pre/post-market hours.
+    Market session = 09:30–16:00 ET, Monday–Friday.
+
+    This prevents false halt detection after weekends, Good Friday,
+    or any multi-day market closure where bar timestamps go stale.
+    A Thursday close → Monday open gap is ~64 hours wall-clock but
+    0 seconds of trading time — correctly returns 0 here.
+    """
+    UTC = timezone.utc
+    ET_OFFSET = timedelta(hours=-4)   # EDT (Mar–Nov); close enough for this purpose
+    OPEN_H, OPEN_M   = 9, 30
+    CLOSE_H, CLOSE_M = 16, 0
+
+    now_utc = pd.Timestamp.now(tz=UTC)
+    last_utc = last_bar_time.astimezone(UTC) if last_bar_time.tzinfo else last_bar_time.replace(tzinfo=UTC)
+
+    if now_utc <= last_utc:
+        return 0.0
+
+    # Guard: more than 14 days old — skip expensive walk, treat as stale
+    if (now_utc - last_utc).total_seconds() > 14 * 86400:
+        return 999999.0
+
+    trading_seconds = 0.0
+    cursor = last_utc
+
+    while cursor < now_utc:
+        cursor_local = cursor + ET_OFFSET
+        dow = cursor_local.weekday()  # 0=Mon … 6=Sun
+
+        # Skip weekends — jump to next Monday 09:30 ET
+        if dow >= 5:
+            days_to_mon = 7 - dow   # Sat→2, Sun→1
+            next_open_local = (cursor_local + timedelta(days=days_to_mon)).replace(
+                hour=OPEN_H, minute=OPEN_M, second=0, microsecond=0
+            )
+            cursor = next_open_local - ET_OFFSET
+            continue
+
+        day_open_local  = cursor_local.replace(hour=OPEN_H, minute=OPEN_M, second=0, microsecond=0)
+        day_close_local = cursor_local.replace(hour=CLOSE_H, minute=CLOSE_M, second=0, microsecond=0)
+        day_open_utc    = day_open_local - ET_OFFSET
+        day_close_utc   = day_close_local - ET_OFFSET
+
+        # Before today's open — jump to open
+        if cursor < day_open_utc:
+            cursor = day_open_utc
+            continue
+
+        # Past today's close — jump to next day's open
+        if cursor >= day_close_utc:
+            next_open_local = (cursor_local + timedelta(days=1)).replace(
+                hour=OPEN_H, minute=OPEN_M, second=0, microsecond=0
+            )
+            cursor = next_open_local - ET_OFFSET
+            continue
+
+        # Inside today's session — accumulate up to min(now, close)
+        segment_end      = min(now_utc, day_close_utc)
+        trading_seconds += (segment_end - cursor).total_seconds()
+        cursor           = segment_end
+
+    return trading_seconds
+
+
 def detect_halt(symbol: str) -> bool:
     """
-    V17.3: IEX-aware halt detection.
+    V19.1: IEX-aware halt detection with weekend/holiday fix.
 
-    The 5% spread threshold was flagging healthy large-cap stocks as halted
-    on every scan cycle. IEX regularly shows 5-18% spreads on CRM, ARM, QCOM
-    etc. because it only sees a fraction of the real order book.
+    Previously used wall-clock diff which caused mass false-halt detection
+    after weekends, Good Friday, or any multi-day closure — the gap between
+    Thursday's last bar and Monday's open is ~64 hours, far exceeding the
+    900s HALT_TIMEOUT_SECONDS threshold, flagging every large-cap as halted
+    at the start of each new week.
 
-    Real trading halts on large-caps show spreads of 20-50%+ or no quotes at all.
-    On IEX we raise the threshold to 25% — only catch truly extreme cases.
-    On SIP (full book) 5% is still a reliable halt signal.
+    Now uses _trading_seconds_since() which only counts seconds when the
+    market was actually open. A real intraday halt shows up as 15+ minutes
+    of missing bars during a live session, which this correctly catches.
 
-    Also rate-limit halt logs to 5 minutes (was 60s — still too spammy on IEX).
+    Spread threshold remains IEX-aware (25% vs 5% for SIP).
     """
     bars = state["bars"].get(symbol)
     if not bars:
@@ -116,14 +186,17 @@ def detect_halt(symbol: str) -> bool:
         last_bar_time = pd.to_datetime(bars[-1]["t"], utc=True)
     except Exception:
         return False
-    diff = (pd.Timestamp.now(tz="UTC") - last_bar_time).total_seconds()
-    q    = state["quotes"].get(symbol, {})
-    bid  = float(q.get("bid", 0) or 0)
-    ask  = float(q.get("ask", 0) or 0)
-    sp   = float(q.get("spread_pct", 999) or 999)
 
-    if diff > HALT_TIMEOUT_SECONDS:
-        _log_halt_once(symbol, f"HALT suspected {symbol}: no fresh bar for {int(diff)}s")
+    # V19.1: trading-hours-only elapsed time, not wall clock
+    trading_diff = _trading_seconds_since(last_bar_time)
+
+    q   = state["quotes"].get(symbol, {})
+    bid = float(q.get("bid", 0) or 0)
+    ask = float(q.get("ask", 0) or 0)
+    sp  = float(q.get("spread_pct", 999) or 999)
+
+    if trading_diff > HALT_TIMEOUT_SECONDS:
+        _log_halt_once(symbol, f"HALT suspected {symbol}: no fresh bar for {int(trading_diff)}s (trading time)")
         return True
 
     # V17.3: feed-aware spread threshold
