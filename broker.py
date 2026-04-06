@@ -1,7 +1,7 @@
 """
 broker.py — Alpaca REST API helpers, sector map, utility functions.
 """
-MODULE_VERSION = "V18.9"
+MODULE_VERSION = "V19.1"
 # V18.6 fixes (last 5%):
 #   1. Circuit breaker — stop trading after 10 consecutive API failures, auto-resume after 5min
 #   2. safe_api_call — 4xx errors now logged explicitly, not silently passed as success
@@ -590,6 +590,7 @@ async def async_submit_limit_order(symbol: str, qty: int, side: str,
         reason = data.get("message") or data.get("code") or str(data)
         log(f"[ORDER FAIL] {symbol} {side} limit status={resp.status}: {reason}")
         # V18.9: 403 available=0 means Alpaca has no position — remove stale state
+        # V19.1: add to blacklist to prevent sync_positions re-restoring it
         if resp.status == 403 and side == "sell" and "available" in str(reason):
             log(f"[STALE POS] {symbol}: Alpaca has no position — removing from state + Supabase")
             _pos = state["positions"].get(symbol, {})
@@ -600,6 +601,7 @@ async def async_submit_limit_order(symbol: str, qty: int, side: str,
                 _qty = int(_pos.get("qty", 1) or 1)
                 state.setdefault("sync_close_outcomes", {})[symbol] = (_last_px - _entry) * _qty
             await del_position(symbol)
+            state.setdefault("stale_pos_blacklist", {})[symbol] = time.time()  # V19.1
             try:
                 from database import supa_delete_open_position as _sdop
                 _sdop(symbol)   # V18.9: prevent restore loop
@@ -651,6 +653,7 @@ async def async_submit_market_order(symbol: str, qty: int, side: str) -> Optiona
                 _qty = int(_pos.get("qty", 1) or 1)
                 state.setdefault("sync_close_outcomes", {})[symbol] = (_last_px - _entry) * _qty
             await del_position(symbol)
+            state.setdefault("stale_pos_blacklist", {})[symbol] = time.time()  # V19.1
             try:
                 from database import supa_delete_open_position as _sdop
                 _sdop(symbol)   # V18.9: prevent restore loop
@@ -694,11 +697,20 @@ async def sync_positions():
 
         broker_positions = await async_get_positions()
         broker_symbols   = set()
+        # V19.1: expire blacklist entries older than 30 minutes
+        _blacklist = state.setdefault("stale_pos_blacklist", {})
+        _now = time.time()
+        state["stale_pos_blacklist"] = {s: t for s, t in _blacklist.items() if _now - t < 1800}
+
         for p in broker_positions:
             sym   = p["symbol"]
             broker_symbols.add(sym)
             qty   = math.floor(float(p["qty"]))
             entry = float(p["avg_entry_price"])
+            # V19.1: skip restore if symbol was recently marked stale
+            if sym in state["stale_pos_blacklist"] and sym not in state["positions"]:
+                log(f"[RESTORE SKIP] {sym}: in stale blacklist — ignoring Alpaca position")
+                continue
             if sym not in state["positions"]:
                 supa = supa_positions.get(sym)
                 if supa:
