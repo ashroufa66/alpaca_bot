@@ -1,7 +1,7 @@
 """
 broker.py — Alpaca REST API helpers, sector map, utility functions.
 """
-MODULE_VERSION = "V19.1"
+MODULE_VERSION = "V19.2"
 # V18.6 fixes (last 5%):
 #   1. Circuit breaker — stop trading after 10 consecutive API failures, auto-resume after 5min
 #   2. safe_api_call — 4xx errors now logged explicitly, not silently passed as success
@@ -708,9 +708,18 @@ async def sync_positions():
             qty   = math.floor(float(p["qty"]))
             entry = float(p["avg_entry_price"])
             # V19.1: skip restore if symbol was recently marked stale
+            # V19.2: BUT only skip if qty is 0 or tiny — if Alpaca shows a real
+            # position (qty > 0), it's genuinely open and must be tracked.
+            # The blacklist was designed to stop phantom restores (qty=0 ghosts),
+            # not to block real positions from being managed.
             if sym in state["stale_pos_blacklist"] and sym not in state["positions"]:
-                log(f"[RESTORE SKIP] {sym}: in stale blacklist — ignoring Alpaca position")
-                continue
+                if qty > 0:
+                    # Real position exists — clear it from blacklist and restore
+                    log(f"[RESTORE UNBLOCK] {sym}: real Alpaca qty={qty} — clearing stale blacklist")
+                    state["stale_pos_blacklist"].pop(sym, None)
+                else:
+                    log(f"[RESTORE SKIP] {sym}: in stale blacklist — ignoring Alpaca position")
+                    continue
             if sym not in state["positions"]:
                 supa = supa_positions.get(sym)
                 if supa:
