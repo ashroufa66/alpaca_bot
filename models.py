@@ -189,19 +189,30 @@ def ai_record_outcome(symbol: str, pnl: float):
     supa_save_kelly(pnl > 0, pnl_r)
 
     # AI training sample — save even for restored positions using price fallback
-    if not features:
-        # V19.0: build minimal features from current price data
-        # Better than skipping — gives AI training signal even for old positions
-        _pos = state["positions"].get(symbol, {})
-        _entry = _pos.get("entry_price", 1.0) or 1.0
-        _atr   = _pos.get("atr_at_entry", 0.01) or 0.01
-        _qty   = int(_pos.get("qty", 1) or 1)
+    if not features or len(features) != len(AI_FEATURE_NAMES):
+        # V19.2: build a full 9-feature fallback vector matching AI_FEATURE_NAMES:
+        # ["score","relative_volume","day_change_pct","minute_momentum_pct",
+        #  "spread_pct","minute_range_pct","ob_imbalance","atr_pct","intraday_str"]
+        # Old code built only 3 features → all restored-position samples had wrong
+        # length → 100% of Supabase samples dropped at training time → AI never trains.
+        _pos    = state["positions"].get(symbol, {})
+        _entry  = float(_pos.get("entry_price", 1.0) or 1.0)
+        _atr    = float(_pos.get("atr_at_entry", 0.01) or 0.01)
+        _qty    = int(_pos.get("qty", 1) or 1)
+        _ret    = float(pnl / (_entry * _qty)) * 100.0 if _entry * _qty > 0 else 0.0
+        _atr_pct = (_atr / _entry * 100.0) if _entry > 0 else 0.0
         features = [
-            float(pnl / (_entry * _qty)) if _entry * _qty > 0 else 0.0,  # return %
-            float(_atr / _entry) if _entry > 0 else 0.0,                  # atr %
-            1.0 if pnl > 0 else 0.0,                                       # win flag
+            min(max(_ret * 2.5, -50), 50),   # score proxy
+            1.0,                               # relative_volume (neutral)
+            min(max(_ret, -30), 30),           # day_change_pct proxy
+            0.0,                               # minute_momentum_pct (unknown)
+            0.5,                               # spread_pct (neutral)
+            0.0,                               # minute_range_pct (unknown)
+            0.0,                               # ob_imbalance (neutral)
+            min(max(_atr_pct, 0), 5),          # atr_pct
+            1.0 if pnl > 0 else 0.0,           # intraday_str proxy
         ]
-        log(f"[AI] {symbol}: using price fallback features (restored pos) — kelly + AI saved")
+        log(f"[AI] {symbol}: using 9-feature fallback (restored pos) — kelly + AI saved")
 
     state["ai_train_data"].append({"features": features, "label": label})
     supa_save_trade(symbol, features, label, pnl)

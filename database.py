@@ -2,7 +2,7 @@
 database.py — All Supabase persistence: trade history, AI samples,
                Kelly samples, open positions.
 """
-MODULE_VERSION = "V18.1"
+MODULE_VERSION = "V19.2"
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -175,13 +175,21 @@ def supa_restore_state():
     data = supa_load_all()
 
     # Restore AI training data
+    _expected = len(AI_FEATURE_NAMES)  # 9
+    _bad = 0
     for row in data["ai_trades"]:
         try:
             features = json.loads(row["features"])
             label    = int(row["label"])
+            # V19.2: skip samples with wrong feature length (old 3-feature fallbacks)
+            if not isinstance(features, list) or len(features) != _expected:
+                _bad += 1
+                continue
             state["ai_train_data"].append({"features": features, "label": label})
         except Exception:
             pass
+    if _bad > 0:
+        log(f"[SUPABASE] Skipped {_bad} AI samples with wrong feature length (stale data)")
 
     # Restore Kelly samples — rebuild wins/losses counters from history
     for row in data["kelly_samples"]:
