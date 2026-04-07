@@ -8,7 +8,7 @@ MODULE_VERSION = "V19.2"
 #   3. market_is_open — always calls get_clock() for holidays/half-days; never local-only
 #   4. Latency-aware execution — orders blocked when latency >= LATENCY_FREEZE_MS
 #   5. Emergency position kill — Alpaca bulk-close when circuit opens with open positions
-print(f"[BROKER] V18.9 loaded — global clock cache 60s | circuit breaker | latency gate | emergency kill")
+print(f"[BROKER] V19.2 loaded — global clock cache 60s | circuit breaker | latency gate | emergency kill | stale blacklist fix")
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -777,3 +777,4 @@ async def sync_positions():
                 await del_position(sym)
     except Exception as e:
         log(f"Position sync error: {e}")
+
