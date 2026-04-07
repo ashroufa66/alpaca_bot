@@ -1,7 +1,7 @@
 """
 models.py — XGBoost/RF momentum model, VWAP model, VWAP reversion entry.
 """
-MODULE_VERSION = "V18.9"
+MODULE_VERSION = "V19.2"
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -76,12 +76,32 @@ def ai_train_model():
 
     No StandardScaler needed — tree models are scale-invariant.
     Falls back to RandomForest if XGBoost not installed.
+
+    V19.2: Filter out samples with wrong feature length before training.
+    Supabase-restored samples can have inhomogeneous feature vectors
+    (empty [], wrong length, or None) which crash numpy array creation.
     """
     data = state["ai_train_data"]
     if len(data) < AI_MIN_TRAINING_SAMPLES:
         return
-    X = [d["features"] for d in data]
-    y = [d["label"]    for d in data]
+
+    expected_len = len(AI_FEATURE_NAMES)  # 9
+    # V19.2: drop any sample with wrong feature length
+    clean_data = [
+        d for d in data
+        if isinstance(d.get("features"), (list, tuple))
+        and len(d["features"]) == expected_len
+    ]
+    dropped = len(data) - len(clean_data)
+    if dropped > 0:
+        log(f"[AI TRAIN] Dropped {dropped} samples with bad feature length (expected {expected_len})")
+
+    if len(clean_data) < AI_MIN_TRAINING_SAMPLES:
+        log(f"[AI TRAIN] Only {len(clean_data)} valid samples after filtering — need {AI_MIN_TRAINING_SAMPLES}")
+        return
+
+    X = [d["features"] for d in clean_data]
+    y = [d["label"]    for d in clean_data]
     if len(set(y)) < 2:
         return
     try:
@@ -121,7 +141,7 @@ def ai_train_model():
         state["ai_last_trained"] = time.time()
         state["ai_last_regime"]  = state["market_regime"]
         model_name = "XGBoost" if XGBOOST_AVAILABLE else "RandomForest"
-        log(f"AI model ({model_name}) trained on {len(data)} samples | "
+        log(f"AI model ({model_name}) trained on {len(clean_data)} samples | "
             f"wins={wins}/{len(y)} | scale_pos={scale:.2f} | "
             f"regime={state['market_regime']}")
     except Exception as e:
