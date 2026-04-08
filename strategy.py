@@ -2,7 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V19.0"
+MODULE_VERSION = "V19.1"
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -101,7 +101,7 @@ async def try_enter(symbol: str) -> bool:
     # V18.9: max trades/day per symbol — prevents churn
     _trades_today = state["symbol_trades_today"].get(symbol, 0)
     _is_bear_now = state.get("market_regime", "chop") == "bear"
-    _max_today = 6 if _is_bear_now else 2   # bear=6, normal=2
+    _max_today = 10 if _is_bear_now else 5   # bear=10, normal=5
     if _trades_today >= _max_today:
         _log_halt_once(f"max_{symbol}", f"[GATE] {symbol} | max trades/day ({_trades_today}/{_max_today})")
         return False
