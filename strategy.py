@@ -634,5 +634,3 @@ async def cleanup_old_orders():
                 state["pending_symbols"].discard(sym)
                 state["pending_orders"].pop(oid, None)
             log(f"[CLEANUP] Removed stale pending_order {oid} for {sym}")
-
-
