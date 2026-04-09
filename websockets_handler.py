@@ -565,5 +565,3 @@ async def order_updates_ws():
         except Exception as e:
             log(f"Order WebSocket error: {e}")
             await asyncio.sleep(5)
-
-
