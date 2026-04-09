@@ -789,3 +789,7 @@ async def sync_positions():
                 await del_position(sym)
     except Exception as e:
         log(f"Position sync error: {e}")
+
+
+
+
