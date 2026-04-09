@@ -1,7 +1,7 @@
 """
 websockets_handler.py — Market data WebSocket and order update WebSocket.
 """
-MODULE_VERSION = "V18.8"
+MODULE_VERSION = "V19.3"
 import os, json, time, math, asyncio
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -550,6 +550,8 @@ async def order_updates_ws():
                             log(f"[SUPABASE] open_positions deleted for {symbol}")
 
                             await del_position(symbol)
+                            # V19.3: clear orphan flag on successful close
+                            state.get("orphan_positions", set()).discard(symbol)
                             set_cooldown(symbol)
                             block_reentry(symbol)
 

@@ -1,7 +1,7 @@
 """
 broker.py — Alpaca REST API helpers, sector map, utility functions.
 """
-MODULE_VERSION = "V19.2"
+MODULE_VERSION = "V19.3"
 # V18.6 fixes (last 5%):
 #   1. Circuit breaker — stop trading after 10 consecutive API failures, auto-resume after 5min
 #   2. safe_api_call — 4xx errors now logged explicitly, not silently passed as success
@@ -592,6 +592,11 @@ async def async_submit_limit_order(symbol: str, qty: int, side: str,
         # V18.9: 403 available=0 means Alpaca has no position — remove stale state
         # V19.1: add to blacklist to prevent sync_positions re-restoring it
         if resp.status == 403 and side == "sell" and "available" in str(reason):
+            # V19.3: skip stale detection for orphan positions — they ARE real,
+            # just missing Supabase records. Let try_exit manage them via TP/SL/EOD.
+            if symbol in state.get("orphan_positions", set()):
+                log(f"[ORPHAN] {symbol}: 403 on sell — position is real, skipping stale removal")
+                return None
             log(f"[STALE POS] {symbol}: Alpaca has no position — removing from state + Supabase")
             _pos = state["positions"].get(symbol, {})
             _entry = _pos.get("entry_price", 0)
@@ -644,6 +649,10 @@ async def async_submit_market_order(symbol: str, qty: int, side: str) -> Optiona
         log(f"[ORDER FAIL] {symbol} {side} market status={resp.status}: {reason}")
         # V18.9: 403 available=0 means Alpaca has no position — remove stale state
         if resp.status == 403 and side == "sell" and "available" in str(reason):
+            # V19.3: skip stale detection for orphan positions
+            if symbol in state.get("orphan_positions", set()):
+                log(f"[ORPHAN] {symbol}: 403 on sell — position is real, skipping stale removal")
+                return None
             log(f"[STALE POS] {symbol}: Alpaca has no position — removing from state + Supabase")
             _pos = state["positions"].get(symbol, {})
             _entry = _pos.get("entry_price", 0)
@@ -747,6 +756,9 @@ async def sync_positions():
                     atr_val    = entry * 0.02
                     strategy   = "momentum"
                     log(f"Restored {sym} qty={qty} entry={entry:.2f} features=NO (no Supabase record)")
+                    # V19.3: mark as orphan — try_exit will manage via TP/SL/EOD only
+                    # prevents the stale-blacklist restore loop on 403 sell attempts
+                    state.setdefault("orphan_positions", set()).add(sym)
 
                 _is_bear_scalp = (strategy == "bear_scalp")
                 await set_position(sym, {
