@@ -3,7 +3,7 @@ config.py — All configuration constants and environment variables.
 Single source of truth for every tunable parameter.
 Import pattern: from config import *
 """
-MODULE_VERSION = "V19.0"
+MODULE_VERSION = "V19.1"
 # V18.7 additions:
 #   1. Adaptive circuit breaker thresholds (normal=10, volatile=15)
 #   2. Equity trailing stop system (EQUITY_TRAIL_*)
@@ -179,8 +179,8 @@ CONFIDENCE_SWEEP_WEIGHT   = 0.20   # institutional sweep
 CONFIDENCE_BREADTH_WEIGHT = 0.15   # market breadth
 
 # ── AI Model ───────────────────────────────────────────────
-AI_MIN_PROBABILITY_PAPER = 0.52
-AI_MIN_PROBABILITY_LIVE  = 0.58
+AI_MIN_PROBABILITY_PAPER = 0.58
+AI_MIN_PROBABILITY_LIVE  = 0.62
 AI_MIN_PROBABILITY       = AI_MIN_PROBABILITY_PAPER if TRADING_MODE == "paper" else AI_MIN_PROBABILITY_LIVE
 AI_MIN_TRAINING_SAMPLES  = 30
 AI_RETRAIN_INTERVAL_SEC  = 1800
