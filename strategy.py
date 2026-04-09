@@ -2,7 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V19.1"
+MODULE_VERSION = "V19.2"
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -478,6 +478,14 @@ async def try_exit(symbol: str) -> bool:
     if detect_halt(symbol):
         return False
 
+    # V19.2: orphan positions (restored with features=NO, no Supabase record)
+    # are managed via TP/SL/EOD only — skip Alpaca qty verification
+    # which triggers 403 -> stale removal -> restore loop
+    _is_orphan = symbol in state.get("orphan_positions", set())
+    if _is_orphan:
+        # mark orphan in state so broker 403 handler ignores it
+        state.setdefault("orphan_positions", set()).add(symbol)
+
     # V17.8+: read pos under lock so we get a consistent snapshot
     async with state["lock"]:
         pos = dict(state["positions"][symbol])   # snapshot copy — safe to read outside lock
@@ -535,15 +543,16 @@ async def try_exit(symbol: str) -> bool:
         # V17.8+: Verify qty against actual Alpaca position to prevent short-selling
         # Alpaca paper trading allows shorts — this guard prevents accidental shorts
         # caused by partial fill tracking desync
-        from broker import get_alpaca_position_qty
-        alpaca_qty = await get_alpaca_position_qty(symbol)
-        if alpaca_qty == 0:
-            # No position at Alpaca — already closed, clean up state
-            log(f"[SELL GUARD] {symbol}: Alpaca shows 0 shares, skipping sell")
-            await del_position(symbol)
-            await discard_pending_symbol(symbol)
-            return False
-        qty = min(qty, alpaca_qty)   # never sell more than we actually own
+        if not _is_orphan:
+            from broker import get_alpaca_position_qty
+            alpaca_qty = await get_alpaca_position_qty(symbol)
+            if alpaca_qty == 0:
+                # No position at Alpaca — already closed, clean up state
+                log(f"[SELL GUARD] {symbol}: Alpaca shows 0 shares, skipping sell")
+                await del_position(symbol)
+                await discard_pending_symbol(symbol)
+                return False
+            qty = min(qty, alpaca_qty)   # never sell more than we actually own
 
         # FIX V11.2: smart sell — use market order when spread is tight
         # or when exiting due to emergency (flash crash, EOD, stop loss)
@@ -569,6 +578,8 @@ async def try_exit(symbol: str) -> bool:
             })
             log(f"🔴 SELL {symbol} qty={qty} bid={bid:.2f} reason={reason} type={order_type_log}")
             write_trade_log("SELL_SUBMITTED", symbol, qty, bid, reason)
+            # V19.2: clear orphan flag — sell submitted successfully
+            state.get("orphan_positions", set()).discard(symbol)
             return True
 
     return False
@@ -634,3 +645,5 @@ async def cleanup_old_orders():
                 state["pending_symbols"].discard(sym)
                 state["pending_orders"].pop(oid, None)
             log(f"[CLEANUP] Removed stale pending_order {oid} for {sym}")
+
+

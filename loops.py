@@ -1,7 +1,7 @@
 """
 loops.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V19.0"
+MODULE_VERSION = "V19.2"
 # V18.7 additions:
 #   1. Emergency close: improved logging + manual check reminder when API is down
 #   2. Adaptive circuit breaker: CB_OPEN_THRESHOLD scales with VIX regime
@@ -599,6 +599,15 @@ async def main():
     await load_scan_universe()
     supa_restore_state()
     await prefetch_historical_bars()
+
+    # V19.2: mark positions restored without Supabase record as orphans
+    # These get managed via TP/SL/EOD in try_exit — no stale loop
+    from database import supa_load_open_positions
+    _supa_syms = {row["symbol"] for row in supa_load_open_positions()}
+    for _sym, _pos in state["positions"].items():
+        if _sym not in _supa_syms:
+            state.setdefault("orphan_positions", set()).add(_sym)
+            log(f"[ORPHAN] {_sym}: marked as orphan (no Supabase record) — TP/SL/EOD only")
 
     await asyncio.gather(
         market_data_ws(),
