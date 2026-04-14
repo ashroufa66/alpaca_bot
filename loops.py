@@ -1,4 +1,5 @@
 """
+print("🔥 LOOPS V19.2 REAL FILE LOADED 🔥")
 loops.py — All async background loops + main entrypoint.
 """
 MODULE_VERSION = "V19.2"
@@ -46,20 +47,29 @@ from indicators import run_scanner
 # =========================================================
 
 def check_module_versions():
-    import importlib
+    import importlib, sys
     log("=" * 65)
     log("MODULE VERSIONS DEPLOYED")
     log("─" * 65)
+
     mods = ["config","state","broker","indicators","scanner",
             "microstructure","database","models","strategy",
             "websockets_handler","loops"]
+
     for mod_name in mods:
         try:
-            mod = importlib.import_module(mod_name)
+            # 🔥 FORCE RELOAD — NO CACHE
+            if mod_name in sys.modules:
+                mod = importlib.reload(sys.modules[mod_name])
+            else:
+                mod = importlib.import_module(mod_name)
+
             ver = getattr(mod, "MODULE_VERSION", "MISSING")
             log(f"  📦 {mod_name:<22} {ver}")
+
         except Exception as e:
             log(f"  ❌ {mod_name:<22} ERROR: {e}")
+
     log("─" * 65)
     log("✅ Module check complete — safe to trade")
     log("=" * 65)
