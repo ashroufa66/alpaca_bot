@@ -5,3 +5,4 @@ xgboost
 requests
 aiohttp
 websockets
+# force rebuild v19.2
