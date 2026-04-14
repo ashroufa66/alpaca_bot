@@ -54,7 +54,7 @@ def check_module_versions():
 
     mods = ["config","state","broker","indicators","scanner",
             "microstructure","database","models","strategy",
-            "websockets_handler","loops"]
+            "websockets_handler","loops_v19"]
 
     for mod_name in mods:
         try:
