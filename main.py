@@ -27,11 +27,11 @@ print("🚀 STARTING BOT — FORCE CLEAN BUILD 🚀")
 # =======================================
 
 import asyncio
-from loops import main
+from loops_v19 import main
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        from loops import shutdown
+        from loops_v19 import shutdown
         asyncio.run(shutdown())
