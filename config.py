@@ -79,7 +79,7 @@ BAR_HISTORY       = 220
 VOLUME_LOOKBACK   = 20
 VOLUME_SPIKE_MULT = 1.15
 VWAP_CONFIRM_BARS = 2
-MIN_ATR_PCT       = 0.40   # V18.9: lowered from 0.7 — IEX in calm BULL days has compressed ATR
+MIN_ATR_PCT       = 0.25   # V18.9: lowered from 0.7 — IEX in calm BULL days has compressed ATR
 
 # ── Market Regime ──────────────────────────────────────────
 REGIME_LOOKBACK        = 50
@@ -159,7 +159,7 @@ POSITIVE_NEWS_KEYWORDS = [
 
 # ── Momentum Strength Thresholds ──────────────────────
 MOMENTUM_WEAK   = 0.50
-MOMENTUM_MED    = 0.60
+MOMENTUM_MED    = 0.50
 MOMENTUM_VWAP   = 0.65
 MOMENTUM_STRONG = 0.70
 
