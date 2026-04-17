@@ -1,8 +1,11 @@
 """
-print("🔥 LOOPS V19.2 REAL FILE LOADED 🔥")
-loops.py — All async background loops + main entrypoint.
+loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V19.2"
+MODULE_VERSION = "V19.4"
+# V19.4: Added exit_watchdog_loop — fallback TP/SL checker every 30s.
+#   Fixes positions getting stuck when IEX bars stop flowing.
+#   Exits now fire from last known quote price even during bar droughts.
+#   Also added try_exit import from strategy.
 # V18.7 additions:
 #   1. Emergency close: improved logging + manual check reminder when API is down
 #   2. Adaptive circuit breaker: CB_OPEN_THRESHOLD scales with VIX regime
@@ -35,7 +38,7 @@ from models import (ai_train_model, vwap_train_model,
 from indicators import detect_market_regime
 from microstructure import get_breadth_score
 
-from strategy import (try_enter, cleanup_old_orders, close_all_positions)
+from strategy import (try_enter, cleanup_old_orders, close_all_positions, try_exit)
 from websockets_handler import market_data_ws, order_updates_ws
 from database import supa_restore_state
 from indicators import should_force_exit_before_close
@@ -78,29 +81,15 @@ def check_module_versions():
 
 # =========================================================
 # FIX V18.7: ADAPTIVE CIRCUIT BREAKER THRESHOLD
-# On volatile days (VIX regime = high or extreme), API calls
-# are naturally slower and more error-prone. Raising the threshold
-# from 10 → 15 prevents false circuit opens on choppy-but-functional days.
 # =========================================================
 
 def get_cb_threshold() -> int:
-    """
-    Returns the appropriate circuit breaker failure threshold
-    based on the current VIX proxy regime.
-    Normal/Low VIX → 10 failures (standard)
-    High/Extreme VIX → 15 failures (more tolerant, API is naturally slower)
-    """
     vix_regime = state.get("vix_proxy_regime", "normal")
     if vix_regime in ("high", "extreme"):
         return CB_OPEN_THRESHOLD_VOLATILE
     return CB_OPEN_THRESHOLD_NORMAL
 
 def update_cb_threshold():
-    """
-    Update the live circuit breaker threshold to match current volatility.
-    Called from housekeeping_loop every 30s.
-    Previous threshold is stored in _cb so cb_record_failure can compare.
-    """
     new_threshold = get_cb_threshold()
     old_threshold = _cb.get("threshold", CB_OPEN_THRESHOLD_NORMAL)
     if new_threshold != old_threshold:
@@ -108,39 +97,23 @@ def update_cb_threshold():
         log(f"[CB] Threshold updated: {old_threshold} → {new_threshold} "
             f"(VIX regime: {state.get('vix_proxy_regime','normal')})")
     else:
-        _cb["threshold"] = new_threshold   # ensure it's always set
+        _cb["threshold"] = new_threshold
 
 
 # =========================================================
 # FIX V18.7: EQUITY TRAILING STOP
-#
-# Tracks peak realized PnL for the day.
-# Once PnL crosses EQUITY_TRAIL_ACTIVATION, protection activates.
-# If PnL then drops more than EQUITY_TRAIL_DRAWDOWN from the peak,
-# all positions are closed and no new entries allowed.
-#
-# This is different from ECP (which tracks account equity drawdown).
-# The equity trail protects *intraday profits* specifically.
-#
-# State: stored in state["equity_trail"] dict
 # =========================================================
 
 def _init_equity_trail():
-    """Initialise equity trail state if not present."""
     if "equity_trail" not in state:
         state["equity_trail"] = {
-            "peak_pnl":   0.0,    # highest realized PnL seen today
-            "active":     False,  # True once PnL >= EQUITY_TRAIL_ACTIVATION
-            "triggered":  False,  # True once trail stop fired today
-            "trail_stop": None,   # current trail stop level ($)
+            "peak_pnl":   0.0,
+            "active":     False,
+            "triggered":  False,
+            "trail_stop": None,
         }
 
 def update_equity_trail():
-    """
-    Called every housekeeping cycle.
-    Updates peak PnL and checks if the trail stop should fire.
-    Returns True if trail stop was just triggered (close all needed).
-    """
     if not EQUITY_TRAIL_ENABLED:
         return False
 
@@ -148,18 +121,14 @@ def update_equity_trail():
     et    = state["equity_trail"]
     pnl   = state["realized_pnl_today"]
 
-    # If trail already fired today, don't re-trigger
     if et["triggered"]:
         return False
 
-    # Track peak PnL (only positive peaks matter)
     if pnl > et["peak_pnl"]:
         et["peak_pnl"] = pnl
-        # Recompute trail stop whenever peak rises
         if et["active"]:
             et["trail_stop"] = et["peak_pnl"] * (1.0 - EQUITY_TRAIL_DRAWDOWN)
 
-    # Activate protection once PnL crosses threshold
     if not et["active"] and pnl >= EQUITY_TRAIL_ACTIVATION:
         et["active"]     = True
         et["trail_stop"] = et["peak_pnl"] * (1.0 - EQUITY_TRAIL_DRAWDOWN)
@@ -168,24 +137,21 @@ def update_equity_trail():
             f"(protect {(1-EQUITY_TRAIL_DRAWDOWN)*100:.0f}% of peak)")
         return False
 
-    # Check if trail stop breached
     if et["active"] and et["trail_stop"] is not None and pnl < et["trail_stop"]:
         et["triggered"] = True
         log(f"🛡️ EQUITY TRAIL TRIGGERED: pnl=${pnl:.2f} < trail_stop=${et['trail_stop']:.2f} "
             f"(peak was ${et['peak_pnl']:.2f}) — closing all positions")
-        return True   # caller should close all positions
+        return True
 
     return False
 
 def equity_trail_allows_entry() -> bool:
-    """Returns False after the trail stop has fired today."""
     if not EQUITY_TRAIL_ENABLED:
         return True
     _init_equity_trail()
     return not state["equity_trail"]["triggered"]
 
 def reset_equity_trail():
-    """Call at start of each trading day."""
     state["equity_trail"] = {
         "peak_pnl":   0.0,
         "active":     False,
@@ -196,30 +162,16 @@ def reset_equity_trail():
 
 # =========================================================
 # FIX V18.7: TRADE FREQUENCY MONITOR
-#
-# Detects dry spells — extended periods with no trades during
-# market hours. This is purely observational: it logs a warning
-# and diagnostic info to help identify over-filtering.
-# It does NOT force entries or change any thresholds.
-#
-# Why useful:
-# The bot has many gates (AI, Kelly, confidence, spread, VIX, regime...).
-# Sometimes they all fire at once for hours. This monitor makes that
-# visible in Railway logs so you know to investigate.
 # =========================================================
 
 _trade_freq = {
     "last_check":       0.0,
     "last_trade_count": 0,
     "dry_spell_start":  None,
-    "warned_at":        {},    # dry_spell_minutes → last_warn_time (rate-limit)
+    "warned_at":        {},
 }
 
 async def check_trade_frequency():
-    """
-    Called from housekeeping_loop.
-    Logs a warning if no trades have occurred in TRADE_FREQ_WINDOW_MIN minutes.
-    """
     if not TRADE_FREQ_ENABLED:
         return
     if not await market_is_open():
@@ -230,14 +182,11 @@ async def check_trade_frequency():
     trades   = state["trades_today"]
     interval = TRADE_FREQ_CHECK_INTERVAL
 
-    # Rate-limit: only check every TRADE_FREQ_CHECK_INTERVAL seconds
     if now - tf["last_check"] < interval:
         return
     tf["last_check"] = now
 
-    # Did a new trade happen since last check?
     if trades > tf["last_trade_count"]:
-        # Trade occurred — reset dry spell
         tf["last_trade_count"] = trades
         if tf["dry_spell_start"] is not None:
             dry_min = (now - tf["dry_spell_start"]) / 60.0
@@ -247,18 +196,15 @@ async def check_trade_frequency():
         tf["warned_at"]       = {}
         return
 
-    # No new trade — start or continue dry spell tracking
     if tf["dry_spell_start"] is None:
         tf["dry_spell_start"] = now
 
     dry_min = (now - tf["dry_spell_start"]) / 60.0
 
     if dry_min < TRADE_FREQ_WINDOW_MIN:
-        return   # within allowed window, not a dry spell yet
+        return
 
-    # ── Dry spell confirmed — log diagnostic ──
-    # Rate-limit: warn once per 30-min bracket
-    bracket = int(dry_min / 30) * 30   # 60, 90, 120, ...
+    bracket = int(dry_min / 30) * 30
     last_warn = tf["warned_at"].get(bracket, 0)
     if now - last_warn < 1800:
         return
@@ -281,7 +227,6 @@ async def check_trade_frequency():
         f"EquityTrail={'ok' if trail_ok else 'TRIGGERED'} "
         f"DailyPnL=${state['realized_pnl_today']:.2f}")
 
-    # Possible reasons summary
     reasons = []
     if regime == "bear":
         reasons.append("bear regime blocking all entries")
@@ -302,6 +247,51 @@ async def check_trade_frequency():
         log(f"   Likely causes: {' | '.join(reasons)}")
     else:
         log(f"   All systems nominal — overfiltering by entry gates")
+
+
+# =========================================================
+# V19.4: EXIT WATCHDOG LOOP
+#
+# Problem: try_exit() only fires when a bar arrives for that symbol
+# in websockets_handler.py. IEX sends 1-min bars — during quiet periods
+# the WebSocket times out (60s no data), reconnects, and exits never fire
+# even when price has already crossed TP/SL.
+#
+# Fix: Independent loop that calls try_exit() every 30s for all open
+# positions using last known quote price from state["quotes"].
+# Exits fire even during bar droughts.
+# =========================================================
+
+async def exit_watchdog_loop():
+    """
+    V19.4: Fallback TP/SL checker — runs every 30s independently of bar flow.
+    Calls try_exit() for every open position using last known quote price.
+    Prevents positions from getting stuck when IEX bars stop flowing.
+    """
+    await asyncio.sleep(30)  # let bot fully start before first check
+    while True:
+        try:
+            if await market_is_open():
+                positions = list(state["positions"].keys())
+                if positions:
+                    checked   = 0
+                    triggered = 0
+                    for symbol in positions:
+                        q = state["quotes"].get(symbol, {})
+                        if q.get("bid", 0) > 0:
+                            result = await try_exit(symbol)
+                            checked += 1
+                            if result:
+                                triggered += 1
+                    if triggered > 0:
+                        log(f"[WATCHDOG] Exit check: {checked} positions checked, "
+                            f"{triggered} exits triggered")
+                    elif checked > 0:
+                        log(f"[WATCHDOG] Exit check: {checked} positions checked, "
+                            f"no exits triggered")
+        except Exception as e:
+            log(f"Exit watchdog error: {e}")
+        await asyncio.sleep(30)
 
 
 # =========================================================
@@ -421,7 +411,6 @@ async def housekeeping_loop():
                 regime = await detect_market_regime()
                 state["last_regime"] = regime
 
-                # FIX V18.7: update adaptive circuit breaker threshold
                 update_cb_threshold()
 
                 # Daily loss gate
@@ -436,12 +425,12 @@ async def housekeeping_loop():
                     await close_all_positions()
                     update_peak_equity()
 
-                # FIX V18.7: equity trailing stop check
+                # Equity trailing stop check
                 if update_equity_trail():
                     log("🛡️ EQUITY TRAIL: closing all positions to protect profits")
                     await close_all_positions()
 
-                # FIX V18.7: emergency close check (circuit breaker open with positions)
+                # Emergency close check
                 if cb_should_emergency_close():
                     await emergency_close_all_positions()
 
@@ -469,7 +458,6 @@ async def housekeeping_loop():
                 ai_status   = "OK" if state["ai_trained"]   else f"{len(state['ai_train_data'])}/{AI_MIN_TRAINING_SAMPLES}"
                 vwap_status = "OK" if state["vwap_trained"] else f"{len(state['vwap_train_data'])}/{VWAP_MODEL_MIN_SAMPLES}"
 
-                # FIX V18.7: equity trail status in status line
                 _et = state.get("equity_trail", {})
                 trail_str = ""
                 if _et.get("active"):
@@ -491,7 +479,6 @@ async def housekeeping_loop():
                     f"BP=${state['account_buying_power']:.0f}"
                 )
 
-                # FIX V18.7: trade frequency check
                 await check_trade_frequency()
 
             else:
@@ -506,27 +493,24 @@ async def housekeeping_loop():
 # MAIN ENTRY POINT
 # =========================================================
 
-
 async def prefetch_historical_bars():
     """
     V18.9: Load 30 historical 1-min bars for whitelist symbols at startup.
     Prevents the 23-minute warmup wait after restart.
-    Uses Alpaca data API with IEX feed.
     """
     from config import LARGE_CAP_WHITELIST, DATA_BASE_URL, DATA_FEED, BAR_HISTORY
     from state import state
     from collections import deque
     import datetime
 
-    symbols = list(LARGE_CAP_WHITELIST)[:20]  # top 20 whitelist symbols
+    symbols = list(LARGE_CAP_WHITELIST)[:20]
     log(f"[PREFETCH] Loading historical bars for {len(symbols)} symbols...")
 
     try:
-        session = state["http_session"]
-        end_dt  = datetime.datetime.utcnow()
+        session  = state["http_session"]
+        end_dt   = datetime.datetime.utcnow()
         start_dt = end_dt - datetime.timedelta(minutes=60)
-        loaded = 0
-        # Fetch per-symbol (multi-symbol endpoint has quirks with IEX feed)
+        loaded   = 0
         for sym in symbols:
             try:
                 params = {
@@ -557,7 +541,6 @@ async def prefetch_historical_bars():
             except Exception:
                 continue
         log(f"[PREFETCH] Loaded bars for {loaded}/{len(symbols)} symbols — ready to trade")
-        # V18.9: seed quotes from prefetch bars — IEX sends bars not quotes
         _seeded = 0
         for sym in symbols:
             _bars = state["bars"].get(sym)
@@ -574,11 +557,13 @@ async def prefetch_historical_bars():
     except Exception as e:
         log(f"[PREFETCH] Failed: {e} — will warmup from WS")
 
+
 async def main():
     log("=" * 65)
-    log("Quantitative Trading Bot V18.7 — Starting up")
+    log("Quantitative Trading Bot V19.4 — Starting up")
     check_module_versions()
     log("─" * 65)
+    log("V19.4 — Exit Watchdog Loop (IEX bar drought fix)")
     log("V18.7 — Adaptive CB | Equity Trail | Trade Freq Monitor")
     log(f"   • Circuit breaker: normal={CB_OPEN_THRESHOLD_NORMAL} | volatile={CB_OPEN_THRESHOLD_VOLATILE} failures")
     log(f"   • Equity trail: activates at +${EQUITY_TRAIL_ACTIVATION:.0f}, allows {(1-EQUITY_TRAIL_DRAWDOWN)*100:.0f}% pullback")
@@ -600,9 +585,7 @@ async def main():
     log("aiohttp session initialized — non-blocking HTTP enabled")
     state["lock"] = asyncio.Lock()
 
-    # FIX V18.7: initialise equity trail at startup
     reset_equity_trail()
-    # FIX V18.7: initialise adaptive CB threshold
     _cb["threshold"] = CB_OPEN_THRESHOLD_NORMAL
 
     load_sector_csv()
@@ -611,7 +594,6 @@ async def main():
     await prefetch_historical_bars()
 
     # V19.2: mark positions restored without Supabase record as orphans
-    # These get managed via TP/SL/EOD in try_exit — no stale loop
     from database import supa_load_open_positions
     _supa_syms = {row["symbol"] for row in supa_load_open_positions()}
     for _sym, _pos in state["positions"].items():
@@ -628,6 +610,7 @@ async def main():
         ai_training_loop(),
         trade_log_worker(),
         heartbeat_loop(),
+        exit_watchdog_loop(),   # V19.4: fallback TP/SL checker
     )
 
 
