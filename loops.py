@@ -1,8 +1,10 @@
 """
-print("🔥 LOOPS V19.2 REAL FILE LOADED 🔥")
 loops.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V19.2"
+MODULE_VERSION = "V19.4"
+# V19.4: Added exit_watchdog_loop — fallback TP/SL checker every 30s.
+#   Fixes positions getting stuck when IEX bars stop flowing.
+#   Exits now fire from last known quote price even during bar droughts.
 # V18.7 additions:
 #   1. Emergency close: improved logging + manual check reminder when API is down
 #   2. Adaptive circuit breaker: CB_OPEN_THRESHOLD scales with VIX regime
@@ -35,7 +37,7 @@ from models import (ai_train_model, vwap_train_model,
 from indicators import detect_market_regime
 from microstructure import get_breadth_score
 
-from strategy import (try_enter, cleanup_old_orders, close_all_positions)
+from strategy import (try_enter, cleanup_old_orders, close_all_positions, try_exit)
 from websockets_handler import market_data_ws, order_updates_ws
 from database import supa_restore_state
 from indicators import should_force_exit_before_close
@@ -302,6 +304,51 @@ async def check_trade_frequency():
         log(f"   Likely causes: {' | '.join(reasons)}")
     else:
         log(f"   All systems nominal — overfiltering by entry gates")
+
+
+# =========================================================
+# V19.4: EXIT WATCHDOG LOOP
+#
+# Problem: try_exit() is only called when a bar arrives for that symbol
+# in websockets_handler.py. IEX sends 1-min bars, and during quiet periods
+# the WebSocket times out after 60s with no data — so exits never fire
+# even when price has already crossed TP/SL.
+#
+# Fix: Independent fallback loop that calls try_exit() every 30s for all
+# open positions using the last known quote price from state["quotes"].
+# This ensures TP/SL triggers even during bar droughts.
+# =========================================================
+
+async def exit_watchdog_loop():
+    """
+    V19.4: Fallback TP/SL checker — runs every 30s independently of bar flow.
+    Calls try_exit() for every open position using last known quote price.
+    Prevents positions from getting stuck when IEX bars stop flowing.
+    """
+    await asyncio.sleep(30)  # let bot fully start before first check
+    while True:
+        try:
+            if await market_is_open():
+                positions = list(state["positions"].keys())
+                if positions:
+                    checked = 0
+                    triggered = 0
+                    for symbol in positions:
+                        q = state["quotes"].get(symbol, {})
+                        if q.get("bid", 0) > 0:
+                            result = await try_exit(symbol)
+                            checked += 1
+                            if result:
+                                triggered += 1
+                    if triggered > 0:
+                        log(f"[WATCHDOG] Exit check: {checked} positions checked, "
+                            f"{triggered} exits triggered")
+                    elif checked > 0:
+                        log(f"[WATCHDOG] Exit check: {checked} positions checked, "
+                            f"no exits triggered")
+        except Exception as e:
+            log(f"Exit watchdog error: {e}")
+        await asyncio.sleep(30)
 
 
 # =========================================================
@@ -576,9 +623,10 @@ async def prefetch_historical_bars():
 
 async def main():
     log("=" * 65)
-    log("Quantitative Trading Bot V18.7 — Starting up")
+    log("Quantitative Trading Bot V19.4 — Starting up")
     check_module_versions()
     log("─" * 65)
+    log("V19.4 — Exit Watchdog Loop (IEX bar drought fix)")
     log("V18.7 — Adaptive CB | Equity Trail | Trade Freq Monitor")
     log(f"   • Circuit breaker: normal={CB_OPEN_THRESHOLD_NORMAL} | volatile={CB_OPEN_THRESHOLD_VOLATILE} failures")
     log(f"   • Equity trail: activates at +${EQUITY_TRAIL_ACTIVATION:.0f}, allows {(1-EQUITY_TRAIL_DRAWDOWN)*100:.0f}% pullback")
@@ -628,6 +676,7 @@ async def main():
         ai_training_loop(),
         trade_log_worker(),
         heartbeat_loop(),
+        exit_watchdog_loop(),   # V19.4: fallback TP/SL checker
     )
 
 
