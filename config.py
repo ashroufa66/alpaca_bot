@@ -87,7 +87,7 @@ REGIME_REFRESH_SECONDS = 120
 CHOP_MIN_SCORE         = 5.0
 
 # ── Risk Management ────────────────────────────────────────
-MAX_OPEN_POSITIONS        = 5
+MAX_OPEN_POSITIONS        = 7
 MAX_TRADES_PER_DAY        = 8
 DAILY_MAX_LOSS_USD        = 250.0
 MAX_POSITION_USD          = 500.0
