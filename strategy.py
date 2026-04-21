@@ -2,7 +2,13 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V19.3" 
+MODULE_VERSION = "V19.6"
+# V19.6: Fixed double-sell short bug (HOOD/COIN pattern).
+#   Root cause: orphan positions skipped the qty cap in try_exit,
+#   so when broker-stop + watchdog both fired simultaneously on qty=1,
+#   two sell orders went through creating an accidental short.
+#   Fix: always cap qty against Alpaca's actual qty for ALL positions
+#   (orphan or not). Only skip the state-removal step for orphans.
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -540,19 +546,26 @@ async def try_exit(symbol: str) -> bool:
     if reason:
         qty = int(pos["qty"])
 
-        # V17.8+: Verify qty against actual Alpaca position to prevent short-selling
-        # Alpaca paper trading allows shorts — this guard prevents accidental shorts
-        # caused by partial fill tracking desync
-        if not _is_orphan:
-            from broker import get_alpaca_position_qty
-            alpaca_qty = await get_alpaca_position_qty(symbol)
-            if alpaca_qty == 0:
-                # No position at Alpaca — already closed, clean up state
-                log(f"[SELL GUARD] {symbol}: Alpaca shows 0 shares, skipping sell")
+        # V19.6: ALWAYS verify qty against Alpaca to prevent accidental shorts.
+        # Previously orphans skipped this check, causing double-sell shorts
+        # when broker-stop + watchdog fired simultaneously on a qty=1 position.
+        # Fix: apply qty cap for ALL positions. Only skip state-removal for orphans.
+        from broker import get_alpaca_position_qty
+        alpaca_qty = await get_alpaca_position_qty(symbol)
+        if alpaca_qty == 0:
+            log(f"[SELL GUARD] {symbol}: Alpaca shows 0 shares, skipping sell")
+            if not _is_orphan:
+                # Non-orphan: clean up state (position already closed elsewhere)
+                from state import del_position
                 await del_position(symbol)
                 await discard_pending_symbol(symbol)
-                return False
-            qty = min(qty, alpaca_qty)   # never sell more than we actually own
+            else:
+                # Orphan: just log, reconciliation loop will handle cleanup
+                log(f"[SELL GUARD] {symbol}: orphan with 0 shares — "
+                    f"reconciliation will clean up")
+            return False
+        # Cap qty to what Alpaca actually holds — prevents shorts from double-sells
+        qty = min(qty, alpaca_qty)
 
         # FIX V11.2: smart sell — use market order when spread is tight
         # or when exiting due to emergency (flash crash, EOD, stop loss)
@@ -597,6 +610,7 @@ async def close_all_positions():  # FIX V12.7: was sync — contains await calls
         if alpaca_qty > 0:
             qty = min(qty, alpaca_qty)
         elif alpaca_qty == 0:
+            from state import del_position
             await del_position(symbol)
             continue
         if bid > 0 and qty > 0:
@@ -645,6 +659,3 @@ async def cleanup_old_orders():
                 state["pending_symbols"].discard(sym)
                 state["pending_orders"].pop(oid, None)
             log(f"[CLEANUP] Removed stale pending_order {oid} for {sym}")
-
-
-
