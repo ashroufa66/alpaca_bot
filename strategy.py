@@ -2,7 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V19.60"
+MODULE_VERSION = "V19.6"
 # V19.6: Fixed double-sell short bug (HOOD/COIN pattern).
 #   Root cause: orphan positions skipped the qty cap in try_exit,
 #   so when broker-stop + watchdog both fired simultaneously on qty=1,
