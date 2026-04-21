@@ -1,7 +1,7 @@
 """
 loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V19.5"
+MODULE_VERSION = "V19.5.1"
 # V19.5 fixes:
 #   1. position_reconciliation_loop — every 5 min, compares state["positions"]
 #      against Alpaca's actual positions. Auto-removes ghosts (qty=0 in Alpaca).
@@ -43,7 +43,7 @@ from strategy import (try_enter, cleanup_old_orders, close_all_positions, try_ex
 from websockets_handler import market_data_ws, order_updates_ws
 from database import supa_restore_state, supa_delete_open_position
 from indicators import run_scanner
-from state import del_position
+from state import del_position, set_position
 
 
 # =========================================================
@@ -631,10 +631,10 @@ async def prefetch_historical_bars():
 
 async def main():
     log("=" * 65)
-    log("Quantitative Trading Bot V19.5 — Starting up")
+    log("Quantitative Trading Bot V19.5.1 — Starting up")
     check_module_versions()
     log("─" * 65)
-    log("V19.5 — Position Reconciliation + EOD Orphan Close Fix")
+    log("V19.5.1 — del_position import fix")
     log("V19.4 — Exit Watchdog Loop (IEX bar drought fix)")
     log("V18.7 — Adaptive CB | Equity Trail | Trade Freq Monitor")
     log(f"   • Circuit breaker: normal={CB_OPEN_THRESHOLD_NORMAL} | "
