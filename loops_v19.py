@@ -1,7 +1,7 @@
 """
 loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V19.5.1"
+MODULE_VERSION = "V19.6"
 # V19.5 fixes:
 #   1. position_reconciliation_loop — every 5 min, compares state["positions"]
 #      against Alpaca's actual positions. Auto-removes ghosts (qty=0 in Alpaca).
@@ -236,13 +236,56 @@ async def check_trade_frequency():
 
 async def position_reconciliation_loop():
     """
-    V19.5: Syncs bot state against Alpaca every 5 minutes.
+    V19.6: Syncs bot state against Alpaca every 5 minutes.
     Removes ghost positions where Alpaca says qty=0.
+    Also runs after market close to clean up Supabase open_positions table
+    — fixes the daily manual cleanup problem where stale rows accumulate.
     """
     await asyncio.sleep(90)  # wait for full startup
+    _did_close_cleanup = False  # track if we've done post-close cleanup today
+
     while True:
         try:
-            if await market_is_open():
+            _is_open = await market_is_open()
+
+            # V19.6: After-close cleanup — runs once per day after market closes.
+            # Clears any remaining open_positions rows from Supabase that
+            # don't match real Alpaca positions. Fixes daily manual cleanup need.
+            if not _is_open and not _did_close_cleanup:
+                try:
+                    log("[RECONCILE] Post-close cleanup — syncing Supabase open_positions...")
+                    alpaca_positions = await async_get_positions()
+                    alpaca_symbols = {
+                        p["symbol"] for p in alpaca_positions
+                        if int(float(p.get("qty", 0))) > 0
+                    }
+                    # Clear all bot state positions not in Alpaca
+                    for symbol in list(state["positions"].keys()):
+                        if symbol not in alpaca_symbols:
+                            await del_position(symbol)
+                            state.get("orphan_positions", set()).discard(symbol)
+                            supa_delete_open_position(symbol)
+                            log(f"[RECONCILE] Post-close: cleared {symbol} from state + Supabase")
+                    # Clear any remaining Supabase rows for non-Alpaca symbols
+                    from database import supa_load_open_positions
+                    supa_rows = supa_load_open_positions()
+                    for row in supa_rows:
+                        sym = row.get("symbol", "")
+                        if sym and sym not in alpaca_symbols:
+                            supa_delete_open_position(sym)
+                            log(f"[RECONCILE] Post-close: deleted stale Supabase row for {sym}")
+                    log("[RECONCILE] Post-close cleanup complete ✅")
+                    _did_close_cleanup = True
+                except Exception as e:
+                    log(f"[RECONCILE] Post-close cleanup error: {e}")
+
+            # Reset daily flag at midnight
+            _et = now_et()
+            if _et.hour == 0 and _et.minute < 5:
+                _did_close_cleanup = False
+
+            if _is_open:
+                _did_close_cleanup = False  # reset if market reopens (new day)
                 bot_symbols = set(state["positions"].keys())
                 if bot_symbols:
                     try:
@@ -330,11 +373,18 @@ async def force_close_all_eod():
     except Exception as e:
         log(f"[EOD] Bulk-close error: {e}")
 
-    # Step 3: clear bot state unconditionally
+    # V19.6: Wait for Alpaca fills to settle before clearing state.
+    # Without this, sync_positions() immediately restores positions
+    # from Alpaca before fills complete — causing infinite EOD retry loop.
+    log("[EOD] Waiting 8s for Alpaca fills to settle...")
+    await asyncio.sleep(8)
+
+    # Step 3: clear bot state + Supabase unconditionally
     for symbol in positions:
         await del_position(symbol)
         state.get("orphan_positions", set()).discard(symbol)
         supa_delete_open_position(symbol)
+        log(f"[EOD] Cleared {symbol} from bot state + Supabase")
 
     log("[EOD] Force-close complete — all positions cleared from bot state")
 
@@ -631,10 +681,10 @@ async def prefetch_historical_bars():
 
 async def main():
     log("=" * 65)
-    log("Quantitative Trading Bot V19.5.1 — Starting up")
+    log("Quantitative Trading Bot V19.6 — Starting up")
     check_module_versions()
     log("─" * 65)
-    log("V19.5.1 — del_position import fix")
+    log("V19.6 — EOD settle delay + post-close Supabase cleanup")
     log("V19.4 — Exit Watchdog Loop (IEX bar drought fix)")
     log("V18.7 — Adaptive CB | Equity Trail | Trade Freq Monitor")
     log(f"   • Circuit breaker: normal={CB_OPEN_THRESHOLD_NORMAL} | "
