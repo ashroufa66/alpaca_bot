@@ -1,14 +1,11 @@
 """
 broker.py — Alpaca REST API helpers, sector map, utility functions.
 """
-MODULE_VERSION = "V19.3"
-# V18.6 fixes (last 5%):
-#   1. Circuit breaker — stop trading after 10 consecutive API failures, auto-resume after 5min
-#   2. safe_api_call — 4xx errors now logged explicitly, not silently passed as success
-#   3. market_is_open — always calls get_clock() for holidays/half-days; never local-only
-#   4. Latency-aware execution — orders blocked when latency >= LATENCY_FREEZE_MS
-#   5. Emergency position kill — Alpaca bulk-close when circuit opens with open positions
-print(f"[BROKER] V19.2 loaded — global clock cache 60s | circuit breaker | latency gate | emergency kill | stale blacklist fix")
+MODULE_VERSION = "V19.7"
+# V19.7: sync_positions now skips short positions (qty < 0).
+# Bot is long-only — accidental shorts from double-sell bugs should never
+# be restored as tracked positions. This stops the infinite 403 loop.
+print(f"[BROKER] V19.7 loaded — skip short restore | global clock cache | circuit breaker | latency gate | emergency kill")
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -716,6 +713,12 @@ async def sync_positions():
             broker_symbols.add(sym)
             qty   = math.floor(float(p["qty"]))
             entry = float(p["avg_entry_price"])
+            # V19.7: Never restore short positions — bot is long-only.
+            # Accidental shorts (from double-sell bugs) should be covered manually,
+            # not tracked as bot positions. Restoring them causes infinite 403 loops.
+            if qty < 0:
+                log(f"[RESTORE SKIP] {sym}: qty={qty} is SHORT — bot is long-only, skipping")
+                continue
             # V19.1: skip restore if symbol was recently marked stale
             # V19.2: BUT only skip if qty is 0 or tiny — if Alpaca shows a real
             # position (qty > 0), it's genuinely open and must be tracked.
@@ -789,7 +792,3 @@ async def sync_positions():
                 await del_position(sym)
     except Exception as e:
         log(f"Position sync error: {e}")
-
-
-
-
