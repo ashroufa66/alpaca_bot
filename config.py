@@ -3,7 +3,7 @@ config.py — All configuration constants and environment variables.
 Single source of truth for every tunable parameter.
 Import pattern: from config import *
 """
-MODULE_VERSION = "V19.1"
+MODULE_VERSION = "V19.9"
 # V18.7 additions:
 #   1. Adaptive circuit breaker thresholds (normal=10, volatile=15)
 #   2. Equity trailing stop system (EQUITY_TRAIL_*)
@@ -85,10 +85,16 @@ MIN_ATR_PCT       = 0.25   # V18.9: lowered from 0.7 — IEX in calm BULL days h
 REGIME_LOOKBACK        = 50
 REGIME_REFRESH_SECONDS = 120
 CHOP_MIN_SCORE         = 5.0
+# V19.9: Strict CHOP filters — only high-conviction setups in choppy markets
+CHOP_AI_MIN_PROB       = 0.65   # AI must be >= 65% confident (vs 60% normal)
+CHOP_MIN_SCORE_STRICT  = 8.0    # Scanner score must be >= 8 (vs 5 normal)
+CHOP_MOMENTUM_MIN      = 0.60   # Momentum strength >= 0.60 (vs 0.50 normal)
+CHOP_VOLUME_REQUIRED   = True   # Volume spike is mandatory in CHOP (no exceptions)
+CHOP_SIZE_FACTOR       = 0.50   # Position size 50% of normal in CHOP
 
 # ── Risk Management ────────────────────────────────────────
 MAX_OPEN_POSITIONS        = 7
-MAX_TRADES_PER_DAY        = 15
+MAX_TRADES_PER_DAY        = 8
 DAILY_MAX_LOSS_USD        = 250.0
 MAX_POSITION_USD          = 500.0
 MIN_POSITION_USD          = 50.0
@@ -127,7 +133,7 @@ COOLDOWN_SECONDS                = 45 * 60
 REENTRY_BLOCK_MINUTES           = 90
 HALT_TIMEOUT_SECONDS            = 900   # V19.0: raised from 300s — prefetch bars can be 30min old
 MARKET_OPEN_DELAY_MINUTES       = 8
-FORCE_EXIT_BEFORE_CLOSE_MINUTES = 15
+FORCE_EXIT_BEFORE_CLOSE_MINUTES = 10
 
 # ── Flash Crash ────────────────────────────────────────────
 FLASH_CRASH_DROP_PCT     = 1.5
@@ -179,7 +185,7 @@ CONFIDENCE_SWEEP_WEIGHT   = 0.20   # institutional sweep
 CONFIDENCE_BREADTH_WEIGHT = 0.15   # market breadth
 
 # ── AI Model ───────────────────────────────────────────────
-AI_MIN_PROBABILITY_PAPER = 0.60
+AI_MIN_PROBABILITY_PAPER = 0.56
 AI_MIN_PROBABILITY_LIVE  = 0.62
 AI_MIN_PROBABILITY       = AI_MIN_PROBABILITY_PAPER if TRADING_MODE == "paper" else AI_MIN_PROBABILITY_LIVE
 AI_MIN_TRAINING_SAMPLES  = 30

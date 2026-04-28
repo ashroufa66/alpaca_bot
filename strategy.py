@@ -2,13 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V19.6"
-# V19.6: Fixed double-sell short bug (HOOD/COIN pattern).
-#   Root cause: orphan positions skipped the qty cap in try_exit,
-#   so when broker-stop + watchdog both fired simultaneously on qty=1,
-#   two sell orders went through creating an accidental short.
-#   Fix: always cap qty against Alpaca's actual qty for ALL positions
-#   (orphan or not). Only skip the state-removal step for orphans.
+MODULE_VERSION = "V19.3" 
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -203,21 +197,34 @@ async def try_enter(symbol: str) -> bool:
         return False   # lunch lull — only trade strong setups
 
     if regime == "chop":
-        detail = state["scanner_details"].get(symbol, {})
-        # V18.9: In CHOP, require score >= CHOP_MIN_SCORE OR high confidence.
-        # Old behaviour: hard block on score < 5 → missed 40-60% of trading day.
-        # New behaviour: strong confidence (>= 0.65) overrides the score gate.
-        # Whitelist symbols (no scanner detail) are still exempt — score=0 is
-        # a missing-data artifact, not a weak signal.
-        if detail and detail.get("score", 0) < CHOP_MIN_SCORE:
-            conf = calc_entry_confidence(symbol, -1.0)   # quick pre-check
-            # V18.9: reduce instead of block — CHOP + weak score + low conf
-            # means smaller position, not zero position.
-            if conf < 0.60:
-                log(f"[CHOP REDUCE] {symbol} | score={detail.get('score',0):.1f} conf={conf:.2f} → size×0.60")
-                # Signal the sizing to reduce — we store in state temporarily
-                state.setdefault("_chop_reduce", set()).add(symbol)
-            # Always proceed (no return False here)
+        # V19.9: Strict CHOP filters — only high-conviction setups allowed.
+        # Root cause of losses: bot was entering marginal setups in CHOP regime
+        # where price has no directional bias, causing repeated stop-loss hits.
+        # Now ALL four conditions must pass in CHOP, no exceptions:
+        #   1. AI probability >= CHOP_AI_MIN_PROB (0.65)
+        #   2. Scanner score >= CHOP_MIN_SCORE_STRICT (8.0)
+        #   3. Momentum strength >= CHOP_MOMENTUM_MIN (0.60)
+        #   4. Volume spike required (no volume = no trade)
+        detail      = state["scanner_details"].get(symbol, {})
+        detail_score = detail.get("score", 0) if detail else 0
+
+        # Quick AI pre-check before expensive indicator calcs
+        _chop_ai = ai_predict_probability(build_feature_vector(symbol, get_indicators(symbol))) if state.get("ai_trained") else -1.0
+
+        # Gate 1: AI confidence
+        if _chop_ai >= 0 and _chop_ai < CHOP_AI_MIN_PROB:
+            log(f"[CHOP BLOCK] {symbol} | AI={_chop_ai:.2%} < {CHOP_AI_MIN_PROB:.0%} required in CHOP")
+            return False
+
+        # Gate 2: Scanner score (whitelist symbols with no detail are exempt)
+        if detail and detail_score < CHOP_MIN_SCORE_STRICT:
+            log(f"[CHOP BLOCK] {symbol} | score={detail_score:.1f} < {CHOP_MIN_SCORE_STRICT:.0f} required in CHOP")
+            return False
+
+        # Gate 3: Momentum strength (checked after indicators load below)
+        # Gate 4: Volume spike (checked after indicators load below)
+        # Both stored in state for post-indicator check
+        state["_chop_strict_check"] = symbol
 
     sector = get_sector(symbol)
     if sector != "unknown" and sector_position_count(sector) >= MAX_SECTOR_POSITIONS:
@@ -246,6 +253,22 @@ async def try_enter(symbol: str) -> bool:
     _has_volume   = volume_spike(df)
     _signals_ok   = sum([_has_cross, _has_sep, _has_volume])
     bull_bar_bonus = consecutive_bull_bars(df)
+
+    # V19.9: Post-indicator CHOP strict checks (momentum + volume)
+    if regime == "chop" and state.get("_chop_strict_check") == symbol:
+        state.pop("_chop_strict_check", None)
+        # Gate 3: Momentum strength
+        if _intraday_str < CHOP_MOMENTUM_MIN:
+            log(f"[CHOP BLOCK] {symbol} | momentum={_intraday_str:.2f} < {CHOP_MOMENTUM_MIN:.2f} required in CHOP")
+            return False
+        # Gate 4: Volume spike mandatory
+        if CHOP_VOLUME_REQUIRED and not _has_volume:
+            log(f"[CHOP BLOCK] {symbol} | no volume spike — required in CHOP")
+            return False
+        # Flag for size reduction
+        state.setdefault("_chop_reduce", set()).add(symbol)
+        log(f"[CHOP PASS] {symbol} | score={state['scanner_details'].get(symbol,{}).get('score',0):.1f} "
+            f"momentum={_intraday_str:.2f} volume={_has_volume} → size×{CHOP_SIZE_FACTOR:.0%}")
 
     if _bear_mode:
         # V18.9: Bear scalp — bypass bullish-biased gates (EMA cross, VWAP, OB imbalance)
@@ -382,7 +405,7 @@ async def try_enter(symbol: str) -> bool:
     # V18.9: Single unified min() factor — ALL reductions applied once, no cascade.
     # Every signal contributes its floor; worst one wins; others are ignored.
     # This prevents: combined=0.5 × flow=0.7 × slip=0.5 = 0.175 collapse.
-    _chop_factor = 0.70 if symbol in state.get("_chop_reduce", set()) else 1.0
+    _chop_factor = CHOP_SIZE_FACTOR if symbol in state.get("_chop_reduce", set()) else 1.0
     _flow_factor = 0.70 if not _flow_ok else 1.0
     state.get("_chop_reduce", set()).discard(symbol)   # cleanup
 
@@ -546,26 +569,19 @@ async def try_exit(symbol: str) -> bool:
     if reason:
         qty = int(pos["qty"])
 
-        # V19.6: ALWAYS verify qty against Alpaca to prevent accidental shorts.
-        # Previously orphans skipped this check, causing double-sell shorts
-        # when broker-stop + watchdog fired simultaneously on a qty=1 position.
-        # Fix: apply qty cap for ALL positions. Only skip state-removal for orphans.
-        from broker import get_alpaca_position_qty
-        alpaca_qty = await get_alpaca_position_qty(symbol)
-        if alpaca_qty == 0:
-            log(f"[SELL GUARD] {symbol}: Alpaca shows 0 shares, skipping sell")
-            if not _is_orphan:
-                # Non-orphan: clean up state (position already closed elsewhere)
-                from state import del_position
+        # V17.8+: Verify qty against actual Alpaca position to prevent short-selling
+        # Alpaca paper trading allows shorts — this guard prevents accidental shorts
+        # caused by partial fill tracking desync
+        if not _is_orphan:
+            from broker import get_alpaca_position_qty
+            alpaca_qty = await get_alpaca_position_qty(symbol)
+            if alpaca_qty == 0:
+                # No position at Alpaca — already closed, clean up state
+                log(f"[SELL GUARD] {symbol}: Alpaca shows 0 shares, skipping sell")
                 await del_position(symbol)
                 await discard_pending_symbol(symbol)
-            else:
-                # Orphan: just log, reconciliation loop will handle cleanup
-                log(f"[SELL GUARD] {symbol}: orphan with 0 shares — "
-                    f"reconciliation will clean up")
-            return False
-        # Cap qty to what Alpaca actually holds — prevents shorts from double-sells
-        qty = min(qty, alpaca_qty)
+                return False
+            qty = min(qty, alpaca_qty)   # never sell more than we actually own
 
         # FIX V11.2: smart sell — use market order when spread is tight
         # or when exiting due to emergency (flash crash, EOD, stop loss)
@@ -610,7 +626,6 @@ async def close_all_positions():  # FIX V12.7: was sync — contains await calls
         if alpaca_qty > 0:
             qty = min(qty, alpaca_qty)
         elif alpaca_qty == 0:
-            from state import del_position
             await del_position(symbol)
             continue
         if bid > 0 and qty > 0:
@@ -659,3 +674,6 @@ async def cleanup_old_orders():
                 state["pending_symbols"].discard(sym)
                 state["pending_orders"].pop(oid, None)
             log(f"[CLEANUP] Removed stale pending_order {oid} for {sym}")
+
+
+
