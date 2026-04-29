@@ -94,7 +94,7 @@ CHOP_SIZE_FACTOR       = 0.50   # Position size 50% of normal in CHOP
 
 # ── Risk Management ────────────────────────────────────────
 MAX_OPEN_POSITIONS        = 7
-MAX_TRADES_PER_DAY        = 8
+MAX_TRADES_PER_DAY        = 15
 DAILY_MAX_LOSS_USD        = 250.0
 MAX_POSITION_USD          = 500.0
 MIN_POSITION_USD          = 50.0
