@@ -1,7 +1,7 @@
 """
 loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V19.6"
+MODULE_VERSION = "V19.9"
 # V19.5 fixes:
 #   1. position_reconciliation_loop — every 5 min, compares state["positions"]
 #      against Alpaca's actual positions. Auto-removes ghosts (qty=0 in Alpaca).
@@ -148,6 +148,9 @@ def reset_equity_trail():
         "triggered":  False,
         "trail_stop": None,
     }
+    # V19.9: Reset EOD sync block at start of new trading day
+    import broker as _broker_mod
+    _broker_mod._eod_close_done = False
 
 
 # =========================================================
@@ -387,6 +390,11 @@ async def force_close_all_eod():
         log(f"[EOD] Cleared {symbol} from bot state + Supabase")
 
     log("[EOD] Force-close complete — all positions cleared from bot state")
+    # V19.9: Block sync_positions() for rest of day — prevents restore loop
+    from broker import _eod_close_done
+    import broker as _broker_mod
+    _broker_mod._eod_close_done = True
+    log("[EOD] sync_positions blocked for rest of day ✅")
 
 
 # =========================================================
@@ -681,10 +689,10 @@ async def prefetch_historical_bars():
 
 async def main():
     log("=" * 65)
-    log("Quantitative Trading Bot V19.6 — Starting up")
+    log("Quantitative Trading Bot V19.9 — Starting up")
     check_module_versions()
     log("─" * 65)
-    log("V19.6 — EOD settle delay + post-close Supabase cleanup")
+    log("V19.9 — EOD sync block (definitive restore loop fix)")
     log("V19.4 — Exit Watchdog Loop (IEX bar drought fix)")
     log("V18.7 — Adaptive CB | Equity Trail | Trade Freq Monitor")
     log(f"   • Circuit breaker: normal={CB_OPEN_THRESHOLD_NORMAL} | "

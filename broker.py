@@ -1,14 +1,17 @@
 """
 broker.py — Alpaca REST API helpers, sector map, utility functions.
 """
-MODULE_VERSION = "V19.8"
+MODULE_VERSION = "V19.9"
 # V18.6 fixes (last 5%):
 #   1. Circuit breaker — stop trading after 10 consecutive API failures, auto-resume after 5min
 #   2. safe_api_call — 4xx errors now logged explicitly, not silently passed as success
 #   3. market_is_open — always calls get_clock() for holidays/half-days; never local-only
 #   4. Latency-aware execution — orders blocked when latency >= LATENCY_FREEZE_MS
 #   5. Emergency position kill — Alpaca bulk-close when circuit opens with open positions
-print(f"[BROKER] V19.8 loaded — sync market-hours guard | skip short restore | circuit breaker | latency gate")
+print(f"[BROKER] V19.9 loaded — EOD sync block | market-hours guard | skip short | circuit breaker")
+# V19.9: EOD sync block flag — set by force_close_all_eod(), cleared at midnight
+_eod_close_done = False
+#print(f"[BROKER] REPLACED — global clock cache 60s | circuit breaker | latency gate | emergency kill | stale blacklist fix")
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -694,17 +697,18 @@ async def sync_positions():
     V16.8: Restores positions from Supabase on startup.
     FIX V18.6: triggers emergency close if circuit is open with open positions.
     FIX V18.5: math.floor for qty.
-    V19.8: Skip sync when market is closed — prevents the EOD restore loop.
+    V19.8: Skip sync when market is closed.
+    V19.9: Skip sync when EOD close already completed today.
     """
-    # V19.8: THE ROOT CAUSE FIX.
-    # sync_positions() was running every 75s with no market-hours check.
-    # After EOD bulk-close cleared bot state, sync_positions() immediately
-    # restored all positions from Alpaca (fills hadn't settled yet).
-    # This caused the infinite EOD loop requiring manual closes every day.
-    # Fix: simply return early when market is closed.
+    global _eod_close_done
+    # V19.9: Block sync after EOD force-close — prevents positions being
+    # restored from Alpaca before fills settle. This is the definitive fix
+    # for the daily manual close problem.
+    if _eod_close_done:
+        return
+    # V19.8: Do not sync after market close
     if not await market_is_open():
         return
-
     # FIX V18.6: emergency close check
     if cb_should_emergency_close():
         await emergency_close_all_positions()
@@ -727,7 +731,6 @@ async def sync_positions():
             qty   = math.floor(float(p["qty"]))
             entry = float(p["avg_entry_price"])
             # V19.7: Never restore short positions — bot is long-only.
-            # Accidental shorts from double-sell bugs should never be tracked.
             if qty < 0:
                 log(f"[RESTORE SKIP] {sym}: qty={qty} is SHORT — bot is long-only, skipping")
                 continue
@@ -804,3 +807,7 @@ async def sync_positions():
                 await del_position(sym)
     except Exception as e:
         log(f"Position sync error: {e}")
+
+
+
+
