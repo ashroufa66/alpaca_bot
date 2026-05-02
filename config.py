@@ -3,7 +3,13 @@ config.py — All configuration constants and environment variables.
 Single source of truth for every tunable parameter.
 Import pattern: from config import *
 """
-MODULE_VERSION = "V19.9"
+MODULE_VERSION = "V20.0"
+# V20.0 changes:
+#   1. SIMULATED_ACCOUNT_SIZE raised $5,000 → $10,000
+#   2. FORCE_EXIT_BEFORE_CLOSE_MINUTES raised 10 → 15 (harder EOD close)
+#   3. BULL regime boost constants added (position size, AI threshold, breadth gate)
+#   4. Per-symbol sell lock constants added (double-sell prevention)
+#   5. REST fallback price poll interval added (IEX bar drought fix)
 # V18.7 additions:
 #   1. Adaptive circuit breaker thresholds (normal=10, volatile=15)
 #   2. Equity trailing stop system (EQUITY_TRAIL_*)
@@ -35,7 +41,7 @@ HEADERS = {
 }
 
 # ── Account ────────────────────────────────────────────────
-SIMULATED_ACCOUNT_SIZE = 5000.0
+SIMULATED_ACCOUNT_SIZE = 10000.0   # V20.0: raised from $5,000 → $10,000
 
 # ── Scanner ────────────────────────────────────────────────
 MAX_SCAN_SYMBOLS          = 1500
@@ -133,7 +139,7 @@ COOLDOWN_SECONDS                = 45 * 60
 REENTRY_BLOCK_MINUTES           = 90
 HALT_TIMEOUT_SECONDS            = 900   # V19.0: raised from 300s — prefetch bars can be 30min old
 MARKET_OPEN_DELAY_MINUTES       = 8
-FORCE_EXIT_BEFORE_CLOSE_MINUTES = 10
+FORCE_EXIT_BEFORE_CLOSE_MINUTES = 15   # V20.0: raised 10→15 — harder EOD close, no overnight carries
 
 # ── Flash Crash ────────────────────────────────────────────
 FLASH_CRASH_DROP_PCT     = 1.5
@@ -394,6 +400,27 @@ REENTRY_TREND_CONFIRM  = True
 
 # ── IEX Gate Override ──────────────────────────────────────
 IEX_DISABLE_MICRO_GATES = True
+
+# ── BULL Regime Boost (V20.0) ──────────────────────────────
+# When market is strongly bullish, be more aggressive on entries.
+# Guards: breadth > threshold AND ConsecLoss < max AND regime == BULL
+BULL_BOOST_ENABLED          = True
+BULL_BOOST_BREADTH_MIN      = 0.70   # breadth must be >= 0.70
+BULL_BOOST_AI_THRESHOLD     = 0.55   # lower AI bar (vs 0.60 normal)
+BULL_BOOST_SIZE_FACTOR      = 1.30   # 30% larger position size
+BULL_BOOST_MAX_CONSEC_LOSS  = 4      # only boost when losing streak < 5
+
+# ── Per-Symbol Sell Lock (V20.0) ───────────────────────────
+# Prevents double-sell / accidental short: once a sell order is
+# submitted for a symbol, block any further sell for SELL_LOCK_SECONDS.
+SELL_LOCK_SECONDS = 15   # lock window after first sell submit
+
+# ── REST Fallback Price Poll (V20.0) ───────────────────────
+# When IEX sends no bars for REST_FALLBACK_NO_DATA_SEC seconds,
+# fetch latest price via Alpaca REST API instead of waiting for WebSocket.
+REST_FALLBACK_ENABLED       = True
+REST_FALLBACK_NO_DATA_SEC   = 120   # trigger after 2 min of silence
+REST_FALLBACK_POLL_SEC      = 60    # poll every 60 seconds while drought active
 
 # ── Supabase ───────────────────────────────────────────────
 SUPABASE_URL     = os.environ.get("SUPABASE_URL", "")
