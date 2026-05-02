@@ -1,7 +1,8 @@
 """
 broker.py — Alpaca REST API helpers, sector map, utility functions.
 """
-MODULE_VERSION = "V19.9"
+MODULE_VERSION = "V20.0"
+# V20.0: REST fallback price fetch for IEX bar droughts
 # V18.6 fixes (last 5%):
 #   1. Circuit breaker — stop trading after 10 consecutive API failures, auto-resume after 5min
 #   2. safe_api_call — 4xx errors now logged explicitly, not silently passed as success
@@ -692,6 +693,63 @@ async def get_alpaca_position_qty(symbol: str) -> int:
     except Exception:
         return 0
 
+
+# V20.0: REST fallback price fetch ─────────────────────────────────────────────
+# Called by the watchdog when IEX WebSocket has sent no bars for
+# REST_FALLBACK_NO_DATA_SEC seconds. Fetches latest trade price via
+# Alpaca's REST API and injects it into state["quotes"] so exit logic
+# can still fire (stop-loss, TP, EOD) even during an IEX data drought.
+_rest_fallback_last_poll: dict[str, float] = {}   # symbol → last poll timestamp
+
+async def rest_fallback_price(symbol: str) -> float | None:
+    """
+    Fetch the latest trade price for a symbol via Alpaca REST.
+    Returns the price as float, or None on failure.
+    Updates state["quotes"][symbol] bid/ask if successful.
+    """
+    if not REST_FALLBACK_ENABLED:
+        return None
+    try:
+        url = f"{DATA_BASE_URL}/v2/stocks/{symbol}/trades/latest"
+        resp = await safe_api_call("GET", url, log_label=f"rest_fb_{symbol}", max_attempts=2)
+        if resp is None or resp.status != 200:
+            return None
+        data = await resp.json()
+        price = float(data.get("trade", {}).get("p", 0) or 0)
+        if price <= 0:
+            return None
+        # Inject into quotes so exit logic sees a fresh price
+        from state import state
+        if symbol in state.get("quotes", {}):
+            state["quotes"][symbol]["bid"]   = price * 0.9995
+            state["quotes"][symbol]["ask"]   = price * 1.0005
+            state["quotes"][symbol]["mid"]   = price
+            state["quotes"][symbol]["_rest_fallback"] = True
+        _rest_fallback_last_poll[symbol] = time.time()
+        log(f"[REST FALLBACK] {symbol}: injected price={price:.2f} (IEX drought)")
+        return price
+    except Exception as e:
+        log(f"[REST FALLBACK] {symbol}: error — {e}")
+        return None
+
+
+async def maybe_rest_fallback(symbol: str, last_bar_time: float) -> None:
+    """
+    Call from watchdog: if no IEX bar arrived in REST_FALLBACK_NO_DATA_SEC
+    seconds AND we haven't polled recently, fetch via REST.
+    last_bar_time: epoch seconds of the last IEX bar received for this symbol.
+    """
+    if not REST_FALLBACK_ENABLED:
+        return
+    now = time.time()
+    drought = now - last_bar_time
+    if drought < REST_FALLBACK_NO_DATA_SEC:
+        return
+    since_poll = now - _rest_fallback_last_poll.get(symbol, 0)
+    if since_poll < REST_FALLBACK_POLL_SEC:
+        return
+    await rest_fallback_price(symbol)
+
 async def sync_positions():
     """
     V16.8: Restores positions from Supabase on startup.
@@ -807,7 +865,3 @@ async def sync_positions():
                 await del_position(sym)
     except Exception as e:
         log(f"Position sync error: {e}")
-
-
-
-
