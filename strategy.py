@@ -2,7 +2,8 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V19.3" 
+MODULE_VERSION = "V20.0"
+# V20.0: per-symbol sell lock (double-sell fix) + BULL regime boost
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -58,6 +59,11 @@ from database import (supa_save_trade_history, supa_save_open_position,
                     is_smart_reentry_ok,
                     get_order_flow_factor,
                     get_vix_size_factor)
+
+# ── V20.0: Per-symbol sell lock ────────────────────────────
+# Maps symbol → timestamp of last sell submission.
+# Any second sell within SELL_LOCK_SECONDS is silently blocked.
+_sell_lock: dict[str, float] = {}
 # ENTRY — MOMENTUM STRATEGY
 # =========================================================
 
@@ -364,15 +370,27 @@ async def try_enter(symbol: str) -> bool:
         ]
     ai_prob  = -1.0
     _ai_size_factor = 1.0   # V18.9: AI reduces size, doesn't block
+    _bull_boost_active = False  # V20.0: BULL regime boost flag
+
+    # V20.0: BULL regime boost — lower AI threshold and raise sizing on strong trend days.
+    # Guards: BULL_BOOST_ENABLED, regime==bull, breadth>=0.70, ConsecLoss<5
+    _eff_ai_min = AI_MIN_PROBABILITY
+    _bull_size_factor = 1.0
+    if (BULL_BOOST_ENABLED
+            and regime == "bull"
+            and state.get("breadth_score", 0) >= BULL_BOOST_BREADTH_MIN
+            and state.get("consec_loss", 0) < BULL_BOOST_MAX_CONSEC_LOSS):
+        _eff_ai_min = BULL_BOOST_AI_THRESHOLD
+        _bull_size_factor = BULL_BOOST_SIZE_FACTOR
+        _bull_boost_active = True
+        log(f"[BULL BOOST] {symbol} | breadth={state.get('breadth_score',0):.2f} "
+            f"AI_min={_eff_ai_min:.2f} size×{_bull_size_factor:.2f}")
+
     if features:
         ai_prob = ai_predict_probability(features)
-        if 0 <= ai_prob < AI_MIN_PROBABILITY:
-            # V18.9: AI is still learning — reduce size instead of hard reject.
-            # Hard reject prevented the AI from collecting training data on
-            # borderline setups. Graduated reduction lets it learn while
-            # limiting downside. Factor: 0.6 at min threshold, scales up.
-            # V18.9: graduated — weak AI gets less penalty than very weak AI
-            _ai_size_factor = max(0.50, (ai_prob / AI_MIN_PROBABILITY) ** 1.2)
+        if 0 <= ai_prob < _eff_ai_min:
+            # V18.9: graduated reduction; V20.0: uses effective threshold (may be boosted)
+            _ai_size_factor = max(0.50, (ai_prob / _eff_ai_min) ** 1.2)
             log(f"[AI REDUCE] {symbol}: prob={ai_prob:.2%} → factor={_ai_size_factor:.2f}")
 
     # FIX V11.6: pass symbol so spread tier is applied inside
@@ -416,18 +434,21 @@ async def try_enter(symbol: str) -> bool:
         _flow_factor,       # 0.70 if thin order flow
         _slip_factor,       # 0.40–1.0 based on spread
     )
+    # V20.0: BULL boost raises size — applied AFTER floor reductions
+    if _bull_boost_active:
+        combined_factor = combined_factor * _bull_size_factor
     qty = max(1, round(qty * combined_factor))
 
-    if combined_factor < 1.0:
+    if combined_factor < 1.0 or _bull_boost_active:
         log(f"[SIZE] {symbol} | combined_factor={combined_factor:.2f} "
             f"(ai={_ai_size_factor:.2f} conf={_conf_size_factor:.2f} "
-            f"chop={_chop_factor:.2f} flow={_flow_factor:.2f} slip={_slip_factor:.2f})")
+            f"chop={_chop_factor:.2f} flow={_flow_factor:.2f} slip={_slip_factor:.2f}"
+            f"{' bull_boost=ON' if _bull_boost_active else ''})")
 
-    # AI upscaling — anchored to threshold, never stacks with reductions
-    if features and state["ai_trained"] and ai_prob > 0 and ai_prob >= AI_MIN_PROBABILITY:
+    # AI upscaling — anchored to effective threshold (boosted in BULL)
+    if features and state["ai_trained"] and ai_prob > 0 and ai_prob >= _eff_ai_min:
         # Scales linearly from 1.0 at threshold to 1.25 at high confidence
-        # e.g. prob=0.52 → 1.00, prob=0.65 → 1.13, prob=0.80 → 1.25
-        ai_up = min(1.50, max(1.0, 1.0 + (ai_prob - AI_MIN_PROBABILITY) * 3.5))
+        ai_up = min(1.50, max(1.0, 1.0 + (ai_prob - _eff_ai_min) * 3.5))
         qty   = max(1, round(qty * ai_up))
 
     # V18.9: hard cap — prevent over-allocation from AI upscaling + boost stacking
@@ -493,6 +514,13 @@ async def try_enter(symbol: str) -> bool:
 
 async def try_exit(symbol: str) -> bool:
     if symbol not in state["positions"] or symbol in state["pending_symbols"]:
+        return False
+
+    # V20.0: Per-symbol sell lock — prevents double-sell / accidental short.
+    # If a sell was already submitted within SELL_LOCK_SECONDS, block this one.
+    _now = time.time()
+    _last_sell = _sell_lock.get(symbol, 0)
+    if _now - _last_sell < SELL_LOCK_SECONDS:
         return False
     # V17.8+: Don't exit if a BUY order is still actively filling for this symbol
     # Prevents stop-loss firing mid-fill which caused RIOT short-sell bug
@@ -600,6 +628,7 @@ async def try_exit(symbol: str) -> bool:
 
         if order:
             oid = order["id"]
+            _sell_lock[symbol] = time.time()   # V20.0: stamp sell lock
             await add_pending(oid, symbol, {
                 "symbol": symbol, "side": "sell",
                 "submitted_at": time.time(),
@@ -674,6 +703,3 @@ async def cleanup_old_orders():
                 state["pending_symbols"].discard(sym)
                 state["pending_orders"].pop(oid, None)
             log(f"[CLEANUP] Removed stale pending_order {oid} for {sym}")
-
-
-
