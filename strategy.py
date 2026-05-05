@@ -2,8 +2,8 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.0"
-# V20.0: per-symbol sell lock (double-sell fix) + BULL regime boost
+MODULE_VERSION = "V20.2"
+# V20.2: Hard Alpaca qty check on ALL sells (including orphans) — foolproof double-sell fix
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -597,19 +597,19 @@ async def try_exit(symbol: str) -> bool:
     if reason:
         qty = int(pos["qty"])
 
-        # V17.8+: Verify qty against actual Alpaca position to prevent short-selling
-        # Alpaca paper trading allows shorts — this guard prevents accidental shorts
-        # caused by partial fill tracking desync
-        if not _is_orphan:
-            from broker import get_alpaca_position_qty
-            alpaca_qty = await get_alpaca_position_qty(symbol)
-            if alpaca_qty == 0:
-                # No position at Alpaca — already closed, clean up state
-                log(f"[SELL GUARD] {symbol}: Alpaca shows 0 shares, skipping sell")
-                await del_position(symbol)
-                await discard_pending_symbol(symbol)
-                return False
-            qty = min(qty, alpaca_qty)   # never sell more than we actually own
+        # V20.2: Hard Alpaca position check — runs for ALL sells including orphans.
+        # Fetches real qty from Alpaca before every sell. If qty <= 0, we either
+        # already sold it (partial fill desync) or it's already short — refuse sell.
+        # This is the foolproof double-sell / accidental short prevention, immune
+        # to container restarts (unlike the in-memory _sell_lock).
+        from broker import get_alpaca_position_qty
+        alpaca_qty = await get_alpaca_position_qty(symbol)
+        if alpaca_qty <= 0:
+            log(f"[SELL GUARD] {symbol}: Alpaca qty={alpaca_qty} ≤ 0 — refusing sell (would create short)")
+            await del_position(symbol)
+            await discard_pending_symbol(symbol)
+            return False
+        qty = min(qty, alpaca_qty)   # never sell more than Alpaca says we own
 
         # FIX V11.2: smart sell — use market order when spread is tight
         # or when exiting due to emergency (flash crash, EOD, stop loss)
