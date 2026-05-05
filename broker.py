@@ -1,7 +1,7 @@
 """
 broker.py — Alpaca REST API helpers, sector map, utility functions.
 """
-MODULE_VERSION = "V20.1"
+MODULE_VERSION = "V20.2"
 # V20.1: close_all_shorts_eod() — guaranteed EOD buy-cover for orphan shorts
 # V20.0: REST fallback price fetch for IEX bar droughts
 # V18.6 fixes (last 5%):
@@ -10,7 +10,7 @@ MODULE_VERSION = "V20.1"
 #   3. market_is_open — always calls get_clock() for holidays/half-days; never local-only
 #   4. Latency-aware execution — orders blocked when latency >= LATENCY_FREEZE_MS
 #   5. Emergency position kill — Alpaca bulk-close when circuit opens with open positions
-print(f"[BROKER] V20.1 loaded — EOD sync block | market-hours guard | skip short | circuit breaker | short EOD close")
+print(f"[BROKER] V20.2 loaded — EOD sync block | market-hours guard | skip short | circuit breaker | short EOD close | hard sell guard")
 # V19.9: EOD sync block flag — set by force_close_all_eod(), cleared at midnight
 _eod_close_done = False
 #print(f"[BROKER] REPLACED — global clock cache 60s | circuit breaker | latency gate | emergency kill | stale blacklist fix")
