@@ -3,7 +3,10 @@ config.py — All configuration constants and environment variables.
 Single source of truth for every tunable parameter.
 Import pattern: from config import *
 """
-MODULE_VERSION = "V20.0"
+MODULE_VERSION = "V20.1"
+# V20.1 changes:
+#   1. MAX_POSITION_USD raised $500 → $2,000 (matches $10K account sizing)
+#   2. close_all_shorts_eod() added to broker — fixes weekend carry-over shorts
 # V20.0 changes:
 #   1. SIMULATED_ACCOUNT_SIZE raised $5,000 → $10,000
 #   2. FORCE_EXIT_BEFORE_CLOSE_MINUTES raised 10 → 15 (harder EOD close)
@@ -102,7 +105,7 @@ CHOP_SIZE_FACTOR       = 0.50   # Position size 50% of normal in CHOP
 MAX_OPEN_POSITIONS        = 7
 MAX_TRADES_PER_DAY        = 15
 DAILY_MAX_LOSS_USD        = 250.0
-MAX_POSITION_USD          = 500.0
+MAX_POSITION_USD          = 2000.0   # V20.1: raised $500→$2000 to match $10K account
 MIN_POSITION_USD          = 50.0
 MAX_TOTAL_EXPOSURE_PCT    = 0.35
 MAX_NEW_ENTRIES_PER_CYCLE = 2
