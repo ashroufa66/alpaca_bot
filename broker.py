@@ -1,7 +1,8 @@
 """
 broker.py — Alpaca REST API helpers, sector map, utility functions.
 """
-MODULE_VERSION = "V20.0"
+MODULE_VERSION = "V20.1"
+# V20.1: close_all_shorts_eod() — guaranteed EOD buy-cover for orphan shorts
 # V20.0: REST fallback price fetch for IEX bar droughts
 # V18.6 fixes (last 5%):
 #   1. Circuit breaker — stop trading after 10 consecutive API failures, auto-resume after 5min
@@ -9,7 +10,7 @@ MODULE_VERSION = "V20.0"
 #   3. market_is_open — always calls get_clock() for holidays/half-days; never local-only
 #   4. Latency-aware execution — orders blocked when latency >= LATENCY_FREEZE_MS
 #   5. Emergency position kill — Alpaca bulk-close when circuit opens with open positions
-print(f"[BROKER] V19.9 loaded — EOD sync block | market-hours guard | skip short | circuit breaker")
+print(f"[BROKER] V20.1 loaded — EOD sync block | market-hours guard | skip short | circuit breaker | short EOD close")
 # V19.9: EOD sync block flag — set by force_close_all_eod(), cleared at midnight
 _eod_close_done = False
 #print(f"[BROKER] REPLACED — global clock cache 60s | circuit breaker | latency gate | emergency kill | stale blacklist fix")
@@ -692,6 +693,53 @@ async def get_alpaca_position_qty(symbol: str) -> int:
         return max(0, math.floor(float(data.get("qty", 0) or 0)))
     except Exception:
         return 0
+
+
+# V20.1: EOD Short Closer ──────────────────────────────────────────────────────
+# The main EOD force-close only sees positions in state["positions"],
+# but short positions are skipped by RESTORE SKIP (bot is long-only) and
+# never enter bot state. This means orphan shorts can carry over to the
+# next day/weekend without being closed.
+#
+# This function queries Alpaca directly for ALL positions, finds any with
+# qty < 0 (shorts), and submits buy-to-cover market orders for each.
+# Called by force_close_all_eod() before the bulk-close fallback.
+
+async def close_all_shorts_eod() -> int:
+    """
+    V20.1: Buy-cover all short positions at Alpaca at EOD.
+    Returns the number of shorts closed.
+    """
+    closed = 0
+    try:
+        broker_positions = await async_get_positions()
+        shorts = [(p["symbol"], math.floor(float(p["qty"])))
+                  for p in broker_positions
+                  if math.floor(float(p.get("qty", 0))) < 0]
+
+        if not shorts:
+            log("[EOD SHORTS] No short positions found ✅")
+            return 0
+
+        log(f"[EOD SHORTS] Found {len(shorts)} short(s) to cover: "
+            f"{', '.join(f'{s}({q})' for s, q in shorts)}")
+
+        for symbol, qty in shorts:
+            cover_qty = abs(qty)
+            try:
+                result = await async_submit_market_order(symbol, cover_qty, "buy")
+                if result:
+                    log(f"[EOD SHORTS] ✅ Buy-cover submitted {symbol} qty={cover_qty}")
+                    closed += 1
+                else:
+                    log(f"[EOD SHORTS] ⚠️ {symbol} buy-cover returned None — bulk-close will handle")
+            except Exception as e:
+                log(f"[EOD SHORTS] Error covering {symbol}: {e}")
+
+    except Exception as e:
+        log(f"[EOD SHORTS] Error fetching positions: {e}")
+
+    return closed
 
 
 # V20.0: REST fallback price fetch ─────────────────────────────────────────────
