@@ -1,7 +1,7 @@
 """
 loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V20.1"
+MODULE_VERSION = "V20.2"
 # V19.5 fixes:
 #   1. position_reconciliation_loop — every 5 min, compares state["positions"]
 #      against Alpaca's actual positions. Auto-removes ghosts (qty=0 in Alpaca).
@@ -62,7 +62,14 @@ def check_module_versions():
     for mod_name in mods:
         try:
             if mod_name in sys.modules:
-                mod = importlib.reload(sys.modules[mod_name])
+                mod = sys.modules[mod_name]
+                # V20.2: invalidate bytecode cache so reload reads the actual .py file
+                # Without this, importlib.reload() returns the cached .pyc version
+                # and shows a stale MODULE_VERSION even after a fresh deployment.
+                spec = getattr(mod, "__spec__", None)
+                if spec and spec.origin:
+                    importlib.invalidate_caches()
+                mod = importlib.reload(mod)
             else:
                 mod = importlib.import_module(mod_name)
             ver = getattr(mod, "MODULE_VERSION", "MISSING")
@@ -698,9 +705,10 @@ async def prefetch_historical_bars():
 
 async def main():
     log("=" * 65)
-    log("Quantitative Trading Bot V20.1 — Starting up")
+    log("Quantitative Trading Bot V20.2 — Starting up")
     check_module_versions()
     log("─" * 65)
+    log("V20.2 — Hard Alpaca sell guard | fix version cache display")
     log("V20.1 — Short EOD close | MAX_POSITION $2K | carry-over fix")
     log("V20.0 — Sell lock | BULL boost | REST fallback | $10K sizing | EOD 15min")
     log("V19.9 — EOD sync block (definitive restore loop fix)")
