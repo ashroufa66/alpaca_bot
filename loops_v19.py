@@ -1,7 +1,7 @@
 """
 loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V20.0"
+MODULE_VERSION = "V20.1"
 # V19.5 fixes:
 #   1. position_reconciliation_loop — every 5 min, compares state["positions"]
 #      against Alpaca's actual positions. Auto-removes ghosts (qty=0 in Alpaca).
@@ -30,6 +30,7 @@ from broker import (log, refresh_account, sync_positions,
                      cb_is_open, cb_should_emergency_close,
                      emergency_close_all_positions, _cb,
                      async_get_positions, async_submit_market_order,
+                     close_all_shorts_eod,
                      now_et)
 from models import (ai_train_model, vwap_train_model,
                     calc_kelly_fraction, get_drawdown_pct,
@@ -336,13 +337,21 @@ async def force_close_all_eod():
     Uses Alpaca bulk-close as guaranteed fallback.
     """
     positions = list(state["positions"].keys())
-    if not positions:
+
+    # V20.1: Always close shorts first — they live outside bot state
+    shorts_closed = await close_all_shorts_eod()
+
+    if not positions and shorts_closed == 0:
         return
 
-    log(f"[EOD] Force-closing {len(positions)} position(s): "
-        f"{', '.join(positions)}")
+    if positions:
+        log(f"[EOD] Force-closing {len(positions)} position(s): "
+            f"{', '.join(positions)}")
 
-    # Step 1: individual market sells
+    # V20.1: Close any short positions first (orphan shorts not in bot state)
+    # (already called above if positions was empty — skip if already done)
+
+    # Step 1: individual market sells (long positions in bot state)
     for symbol in positions:
         pos = state["positions"].get(symbol, {})
         qty = int(pos.get("qty", 0))
@@ -689,9 +698,10 @@ async def prefetch_historical_bars():
 
 async def main():
     log("=" * 65)
-    log("Quantitative Trading Bot V20.0 — Starting up")
+    log("Quantitative Trading Bot V20.1 — Starting up")
     check_module_versions()
     log("─" * 65)
+    log("V20.1 — Short EOD close | MAX_POSITION $2K | carry-over fix")
     log("V20.0 — Sell lock | BULL boost | REST fallback | $10K sizing | EOD 15min")
     log("V19.9 — EOD sync block (definitive restore loop fix)")
     log("V19.4 — Exit Watchdog Loop (IEX bar drought fix)")
