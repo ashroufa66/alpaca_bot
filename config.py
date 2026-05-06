@@ -3,7 +3,10 @@ config.py — All configuration constants and environment variables.
 Single source of truth for every tunable parameter.
 Import pattern: from config import *
 """
-MODULE_VERSION = "V20.1"
+MODULE_VERSION = "V20.3"
+# V20.3 changes:
+#   1. MARKET_OPEN_DELAY_MINUTES raised 8→20 (no more blind open trades)
+#   2. AI_BLOCK_NO_FEATURES=True — hard block when ai=-100% (no features)
 # V20.1 changes:
 #   1. MAX_POSITION_USD raised $500 → $2,000 (matches $10K account sizing)
 #   2. close_all_shorts_eod() added to broker — fixes weekend carry-over shorts
@@ -96,6 +99,11 @@ REGIME_REFRESH_SECONDS = 120
 CHOP_MIN_SCORE         = 5.0
 # V19.9: Strict CHOP filters — only high-conviction setups in choppy markets
 CHOP_AI_MIN_PROB       = 0.65   # AI must be >= 65% confident (vs 60% normal)
+
+# V20.3: Hard block entries when AI has no features (ai_prob == -1.0)
+# Previously ai=-100% entries were allowed with reduced size — this was wrong
+# and caused all of today's losses. No features = no trade.
+AI_BLOCK_NO_FEATURES    = True    # hard block when ai_prob == -1 (untrained/no features)
 CHOP_MIN_SCORE_STRICT  = 8.0    # Scanner score must be >= 8 (vs 5 normal)
 CHOP_MOMENTUM_MIN      = 0.60   # Momentum strength >= 0.60 (vs 0.50 normal)
 CHOP_VOLUME_REQUIRED   = True   # Volume spike is mandatory in CHOP (no exceptions)
@@ -141,7 +149,7 @@ SLIPPAGE_IEX_MULT    = 0.4
 COOLDOWN_SECONDS                = 45 * 60
 REENTRY_BLOCK_MINUTES           = 90
 HALT_TIMEOUT_SECONDS            = 900   # V19.0: raised from 300s — prefetch bars can be 30min old
-MARKET_OPEN_DELAY_MINUTES       = 8
+MARKET_OPEN_DELAY_MINUTES       = 20   # V20.3: raised 8→20 min (IEX bars + AI features need time to build)
 FORCE_EXIT_BEFORE_CLOSE_MINUTES = 15   # V20.0: raised 10→15 — harder EOD close, no overnight carries
 
 # ── Flash Crash ────────────────────────────────────────────
