@@ -2,8 +2,8 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.2"
-# V20.2: Hard Alpaca qty check on ALL sells (including orphans) — foolproof double-sell fix
+MODULE_VERSION = "V20.3"
+# V20.3: Hard block on ai=-1 (no features) entries + open delay raised to 20 min
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -388,6 +388,15 @@ async def try_enter(symbol: str) -> bool:
 
     if features:
         ai_prob = ai_predict_probability(features)
+
+        # V20.3: Hard block when AI has no features (returns -1.0).
+        # Previously these were allowed with reduced size — caused all open-hour
+        # losses because IEX bars hadn't built up enough for features yet.
+        # ai_prob == -1.0 means the model returned -1 (untrained or no features).
+        if AI_BLOCK_NO_FEATURES and ai_prob < 0:
+            log(f"[AI BLOCK] {symbol}: ai={ai_prob:.2%} — no features, skipping entry")
+            return False
+
         if 0 <= ai_prob < _eff_ai_min:
             # V18.9: graduated reduction; V20.0: uses effective threshold (may be boosted)
             _ai_size_factor = max(0.50, (ai_prob / _eff_ai_min) ** 1.2)
