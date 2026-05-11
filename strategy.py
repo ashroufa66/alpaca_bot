@@ -2,7 +2,8 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.5"
+MODULE_VERSION = "V20.6"
+# V20.6: AI sizing-only (not blocking) + relaxed CHOP + VWAP/volume reduce not block
 # V20.4: Block entries on fallback features (3-item price/volume) — fixes ai=-100% escaping AI block
 import os, json, time, math, asyncio, csv
 from collections import deque
@@ -302,14 +303,16 @@ async def try_enter(symbol: str) -> bool:
             return False
 
         if not _has_volume and _intraday_str < MOMENTUM_WEAK:
-            log(f"[DEBUG BLOCK] {symbol} | no volume spike + weak momentum "
-                f"(strength={_intraday_str:.2f})")
-            return False
+            log(f"[WEAK SETUP] {symbol} | no volume spike + weak momentum "
+                f"(strength={_intraday_str:.2f}) → size×0.70")
+            # V20.6: don't block — reduce size instead
+            state.setdefault("_weak_setup", set()).add(symbol)
 
         if not vwap_confirmed(df):
             if _intraday_str < MOMENTUM_VWAP:
-                log(f"[DEBUG BLOCK] {symbol} | VWAP not confirmed + strength={_intraday_str:.2f}")
-                return False
+                # V20.6: don't block on VWAP — reduce size instead
+                log(f"[WEAK SETUP] {symbol} | VWAP not confirmed + strength={_intraday_str:.2f} → size×0.70")
+                state.setdefault("_weak_setup", set()).add(symbol)
 
         if not atr_ok(df):
             log(f"[DEBUG BLOCK] {symbol} | ATR too small")
@@ -400,18 +403,20 @@ async def try_enter(symbol: str) -> bool:
     if features:
         ai_prob = ai_predict_probability(features)
 
-        # V20.3: Hard block when AI has no features (returns -1.0).
-        # Previously these were allowed with reduced size — caused all open-hour
-        # losses because IEX bars hadn't built up enough for features yet.
-        # ai_prob == -1.0 means the model returned -1 (untrained or no features).
+        # V20.4: Hard block on fallback features stays — that's a real data quality fix.
+        # V20.6: AI no longer hard-blocks on low probability.
+        # Use AI for SIZING only — low prob = smaller position, not no trade.
+        # Hard blocking was preventing too many trades and hurting win rate by
+        # only sampling the most "obvious" setups (which IEX data makes unreliable anyway).
         if AI_BLOCK_NO_FEATURES and ai_prob < 0:
             log(f"[AI BLOCK] {symbol}: ai={ai_prob:.2%} — no features, skipping entry")
             return False
 
         if 0 <= ai_prob < _eff_ai_min:
-            # V18.9: graduated reduction; V20.0: uses effective threshold (may be boosted)
-            _ai_size_factor = max(0.50, (ai_prob / _eff_ai_min) ** 1.2)
-            log(f"[AI REDUCE] {symbol}: prob={ai_prob:.2%} → factor={_ai_size_factor:.2f}")
+            # Graduated size reduction for low-confidence AI signals
+            # V20.6: softer penalty — max reduction to 0.65 (was 0.50)
+            _ai_size_factor = max(0.65, (ai_prob / _eff_ai_min) ** 0.8)
+            log(f"[AI REDUCE] {symbol}: prob={ai_prob:.2%} → size×{_ai_size_factor:.2f}")
 
     # FIX V11.6: pass symbol so spread tier is applied inside
     qty = calc_kelly_qty(symbol, ask, atr_value, stop_mult, ai_prob)
@@ -441,18 +446,19 @@ async def try_enter(symbol: str) -> bool:
             return False
 
     # V18.9: Single unified min() factor — ALL reductions applied once, no cascade.
-    # Every signal contributes its floor; worst one wins; others are ignored.
-    # This prevents: combined=0.5 × flow=0.7 × slip=0.5 = 0.175 collapse.
-    _chop_factor = CHOP_SIZE_FACTOR if symbol in state.get("_chop_reduce", set()) else 1.0
-    _flow_factor = 0.70 if not _flow_ok else 1.0
-    state.get("_chop_reduce", set()).discard(symbol)   # cleanup
+    _chop_factor  = CHOP_SIZE_FACTOR if symbol in state.get("_chop_reduce", set()) else 1.0
+    _flow_factor  = 0.70 if not _flow_ok else 1.0
+    _weak_factor  = 0.70 if symbol in state.get("_weak_setup", set()) else 1.0  # V20.6
+    state.get("_chop_reduce", set()).discard(symbol)
+    state.get("_weak_setup", set()).discard(symbol)   # cleanup
 
     combined_factor = min(
-        _ai_size_factor,    # 0.60 if AI below threshold
-        _conf_size_factor,  # 0.50 if conf low in CHOP
-        _chop_factor,       # 0.60 if CHOP + weak score
+        _ai_size_factor,    # 0.65 if AI below threshold (V20.6: softer)
+        _conf_size_factor,  # 0.70 if conf low in CHOP
+        _chop_factor,       # 0.70 if CHOP + weak score (V20.6: raised from 0.50)
         _flow_factor,       # 0.70 if thin order flow
         _slip_factor,       # 0.40–1.0 based on spread
+        _weak_factor,       # 0.70 if VWAP/volume weak (V20.6: size reduce not block)
     )
     # V20.0: BULL boost raises size — applied AFTER floor reductions
     if _bull_boost_active:
@@ -462,7 +468,8 @@ async def try_enter(symbol: str) -> bool:
     if combined_factor < 1.0 or _bull_boost_active:
         log(f"[SIZE] {symbol} | combined_factor={combined_factor:.2f} "
             f"(ai={_ai_size_factor:.2f} conf={_conf_size_factor:.2f} "
-            f"chop={_chop_factor:.2f} flow={_flow_factor:.2f} slip={_slip_factor:.2f}"
+            f"chop={_chop_factor:.2f} flow={_flow_factor:.2f} slip={_slip_factor:.2f} "
+            f"weak={_weak_factor:.2f}"
             f"{' bull_boost=ON' if _bull_boost_active else ''})")
 
     # AI upscaling — anchored to effective threshold (boosted in BULL)
