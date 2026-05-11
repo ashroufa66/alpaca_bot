@@ -3,10 +3,12 @@ config.py — All configuration constants and environment variables.
 Single source of truth for every tunable parameter.
 Import pattern: from config import *
 """
-MODULE_VERSION = "V20.3"
-# V20.3 changes:
-#   1. MARKET_OPEN_DELAY_MINUTES raised 8→20 (no more blind open trades)
-#   2. AI_BLOCK_NO_FEATURES=True — hard block when ai=-100% (no features)
+MODULE_VERSION = "V20.6"
+# V20.6 changes:
+#   1. CHOP filters heavily relaxed (score 8→4, momentum 0.60→0.40, volume not required)
+#   2. AI threshold lowered 0.60→0.52 (AI for sizing only, not blocking)
+#   3. CONFIDENCE_MIN_SCORE lowered 0.25→0.15
+#   4. CHOP_SIZE_FACTOR raised 0.50→0.70
 # V20.1 changes:
 #   1. MAX_POSITION_USD raised $500 → $2,000 (matches $10K account sizing)
 #   2. close_all_shorts_eod() added to broker — fixes weekend carry-over shorts
@@ -96,18 +98,18 @@ MIN_ATR_PCT       = 0.25   # V18.9: lowered from 0.7 — IEX in calm BULL days h
 # ── Market Regime ──────────────────────────────────────────
 REGIME_LOOKBACK        = 50
 REGIME_REFRESH_SECONDS = 120
-CHOP_MIN_SCORE         = 5.0
-# V19.9: Strict CHOP filters — only high-conviction setups in choppy markets
-CHOP_AI_MIN_PROB       = 0.65   # AI must be >= 65% confident (vs 60% normal)
+CHOP_MIN_SCORE         = 3.0   # V20.6: lowered 5→3
+# V20.6: Relaxed CHOP filters — over-filtering was killing profitability.
+# Market is CHOP most of the time. Previous strict settings blocked 95%+ of setups.
+CHOP_AI_MIN_PROB       = 0.52   # V20.6: lowered 0.65→0.52 (AI used for sizing, not hard blocking)
 
 # V20.3: Hard block entries when AI has no features (ai_prob == -1.0)
-# Previously ai=-100% entries were allowed with reduced size — this was wrong
-# and caused all of today's losses. No features = no trade.
+# This stays — fallback features block is a real fix, not over-filtering.
 AI_BLOCK_NO_FEATURES    = True    # hard block when ai_prob == -1 (untrained/no features)
-CHOP_MIN_SCORE_STRICT  = 8.0    # Scanner score must be >= 8 (vs 5 normal)
-CHOP_MOMENTUM_MIN      = 0.60   # Momentum strength >= 0.60 (vs 0.50 normal)
-CHOP_VOLUME_REQUIRED   = True   # Volume spike is mandatory in CHOP (no exceptions)
-CHOP_SIZE_FACTOR       = 0.50   # Position size 50% of normal in CHOP
+CHOP_MIN_SCORE_STRICT  = 4.0    # V20.6: lowered 8→4
+CHOP_MOMENTUM_MIN      = 0.40   # V20.6: lowered 0.60→0.40
+CHOP_VOLUME_REQUIRED   = False  # V20.6: removed mandatory volume spike in CHOP
+CHOP_SIZE_FACTOR       = 0.70   # V20.6: raised 0.50→0.70 (less punishment in CHOP)
 
 # ── Risk Management ────────────────────────────────────────
 MAX_OPEN_POSITIONS        = 7
@@ -188,7 +190,7 @@ MOMENTUM_STRONG = 0.70
 
 # ── Confidence Score Layer ────────────────────────────
 CONFIDENCE_ENABLED        = True
-CONFIDENCE_MIN_SCORE      = 0.25   # V18.9: 0.30→0.25 — CHOP reductions already penalise
+CONFIDENCE_MIN_SCORE      = 0.15   # V20.6: lowered 0.25→0.15 (less blocking, more trades)
 # V18.9: AI weight 0.40→0.25 while AI is untrained (3/30). Redistributed to market signals.
 CONFIDENCE_AI_WEIGHT      = 0.25   # ⚠️  RAISE TO 0.40 AFTER 100 TRADES:
 #   CONFIDENCE_AI_WEIGHT = 0.40
@@ -202,8 +204,8 @@ CONFIDENCE_SWEEP_WEIGHT   = 0.20   # institutional sweep
 CONFIDENCE_BREADTH_WEIGHT = 0.15   # market breadth
 
 # ── AI Model ───────────────────────────────────────────────
-AI_MIN_PROBABILITY_PAPER = 0.60
-AI_MIN_PROBABILITY_LIVE  = 0.62
+AI_MIN_PROBABILITY_PAPER = 0.52   # V20.6: lowered 0.60→0.52 (AI for sizing, not blocking)
+AI_MIN_PROBABILITY_LIVE  = 0.55   # V20.6: lowered 0.62→0.55
 AI_MIN_PROBABILITY       = AI_MIN_PROBABILITY_PAPER if TRADING_MODE == "paper" else AI_MIN_PROBABILITY_LIVE
 AI_MIN_TRAINING_SAMPLES  = 30
 AI_RETRAIN_INTERVAL_SEC  = 1800
