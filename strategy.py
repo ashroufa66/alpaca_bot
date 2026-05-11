@@ -2,8 +2,8 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.3"
-# V20.3: Hard block on ai=-1 (no features) entries + open delay raised to 20 min
+MODULE_VERSION = "V20.4"
+# V20.4: Block entries on fallback features (3-item price/volume) — fixes ai=-100% escaping AI block
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -361,6 +361,8 @@ async def try_enter(symbol: str) -> bool:
     features = build_feature_vector(symbol, df)
     # V18.9: guarantee features is never empty — use price/volume as fallback
     # This ensures ai_trades records every trade even before AI is trained
+    # V20.4: track whether features are real or fallback — fallback = hard block
+    _features_are_fallback = False
     if not features:
         _last = df.iloc[-1]
         features = [
@@ -368,6 +370,15 @@ async def try_enter(symbol: str) -> bool:
             float(_last.get("volume", 0)) / 1e6,
             float(atr_value / ask) if ask > 0 else 0.0,
         ]
+        _features_are_fallback = True
+
+    # V20.4: Hard block on fallback features — the model was trained on 9 real
+    # indicator features. When only 3 price/volume fallback features are available
+    # (IEX bars not built up yet), the model returns a garbage probability that
+    # can pass the AI threshold. Block ALL entries with fallback features.
+    if AI_BLOCK_NO_FEATURES and _features_are_fallback:
+        log(f"[AI BLOCK] {symbol}: fallback features only — bars not ready, skipping entry")
+        return False
     ai_prob  = -1.0
     _ai_size_factor = 1.0   # V18.9: AI reduces size, doesn't block
     _bull_boost_active = False  # V20.0: BULL regime boost flag
