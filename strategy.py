@@ -2,7 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.4"
+MODULE_VERSION = "V20.5"
 # V20.4: Block entries on fallback features (3-item price/volume) — fixes ai=-100% escaping AI block
 import os, json, time, math, asyncio, csv
 from collections import deque
