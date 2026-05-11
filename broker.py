@@ -1,8 +1,8 @@
 """
 broker.py — Alpaca REST API helpers, sector map, utility functions.
 """
-MODULE_VERSION = "V20.2"
-# V20.1: close_all_shorts_eod() — guaranteed EOD buy-cover for orphan shorts
+MODULE_VERSION = "V20.5"
+# V20.5: Restore uses qty_available (settled shares) not qty (total) — fixes 403 sell loops
 # V20.0: REST fallback price fetch for IEX bar droughts
 # V18.6 fixes (last 5%):
 #   1. Circuit breaker — stop trading after 10 consecutive API failures, auto-resume after 5min
@@ -10,7 +10,7 @@ MODULE_VERSION = "V20.2"
 #   3. market_is_open — always calls get_clock() for holidays/half-days; never local-only
 #   4. Latency-aware execution — orders blocked when latency >= LATENCY_FREEZE_MS
 #   5. Emergency position kill — Alpaca bulk-close when circuit opens with open positions
-print(f"[BROKER] V20.2 loaded — EOD sync block | market-hours guard | skip short | circuit breaker | short EOD close | hard sell guard")
+print(f"[BROKER] V20.5 loaded — EOD sync block | market-hours guard | skip short | circuit breaker | short EOD close | hard sell guard | qty_available restore")
 # V19.9: EOD sync block flag — set by force_close_all_eod(), cleared at midnight
 _eod_close_done = False
 #print(f"[BROKER] REPLACED — global clock cache 60s | circuit breaker | latency gate | emergency kill | stale blacklist fix")
@@ -836,6 +836,7 @@ async def sync_positions():
             broker_symbols.add(sym)
             qty   = math.floor(float(p["qty"]))
             entry = float(p["avg_entry_price"])
+            alpaca_pos = p   # V20.5: pass full dict for qty_available check
             # V19.7: Never restore short positions — bot is long-only.
             if qty < 0:
                 log(f"[RESTORE SKIP] {sym}: qty={qty} is SHORT — bot is long-only, skipping")
@@ -885,8 +886,25 @@ async def sync_positions():
                     state.setdefault("orphan_positions", set()).add(sym)
 
                 _is_bear_scalp = (strategy == "bear_scalp")
+
+                # V20.5: Use qty_available from Alpaca (settled shares only).
+                # qty = total shares, qty_available = shares available to sell.
+                # If qty_available < qty, shares are unsettled — use available qty
+                # for the position so sells don't 403. If qty_available == 0,
+                # mark as orphan so watchdog manages via EOD close only.
+                qty_available = int(alpaca_pos.get("qty_available", qty) or qty)
+                if qty_available <= 0:
+                    log(f"[RESTORE SKIP QTY] {sym}: qty={qty} but available=0 — shares unsettled, marking orphan")
+                    state.setdefault("orphan_positions", set()).add(sym)
+                    qty_to_restore = qty   # keep full qty in state, watchdog will retry
+                elif qty_available < qty:
+                    log(f"[RESTORE QTY FIX] {sym}: total={qty} available={qty_available} — using available qty")
+                    qty_to_restore = qty_available
+                else:
+                    qty_to_restore = qty
+
                 await set_position(sym, {
-                    "entry_price": entry, "qty": qty, "highest_price": entry,
+                    "entry_price": entry, "qty": qty_to_restore, "highest_price": entry,
                     "atr_at_entry": atr_val, "stop_price": stop_price,
                     "tp_price": tp_price, "sector": get_sector(sym),
                     "entry_features": features, "strategy": strategy,
