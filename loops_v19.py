@@ -1,7 +1,7 @@
 """
 loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V20.2"
+MODULE_VERSION = "V20.5"
 # V19.5 fixes:
 #   1. position_reconciliation_loop — every 5 min, compares state["positions"]
 #      against Alpaca's actual positions. Auto-removes ghosts (qty=0 in Alpaca).
@@ -705,9 +705,11 @@ async def prefetch_historical_bars():
 
 async def main():
     log("=" * 65)
-    log("Quantitative Trading Bot V20.2 — Starting up")
+    log("Quantitative Trading Bot V20.5 — Starting up")
     check_module_versions()
     log("─" * 65)
+    log("V20.5 — qty_available restore fix | no more 403 sell loops on unsettled shares")
+    log("V20.4 — Fallback features hard block | true ai=-100% prevention")
     log("V20.2 — Hard Alpaca sell guard | fix version cache display")
     log("V20.1 — Short EOD close | MAX_POSITION $2K | carry-over fix")
     log("V20.0 — Sell lock | BULL boost | REST fallback | $10K sizing | EOD 15min")
