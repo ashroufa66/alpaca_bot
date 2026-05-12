@@ -3,7 +3,7 @@ strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
 MODULE_VERSION = "V20.8"
-# V20.8: Gap Day Mode — 4 guards (EMAs, VWAP, tiered distance, min-ATR) replacing ATR/EMA-sep
+# V20.8: Gap Day Mode — 5 guards (EMA hold, EMA dist, VWAP+slope, tiered abs-dist, min-ATR)
 # V20.7: del_position import fix + VWAP block untrained + qty_available orphan at fill
 # V20.6: AI sizing-only (not blocking) + relaxed CHOP + VWAP/volume reduce not block
 # V20.4: Block entries on fallback features (3-item price/volume) — fixes ai=-100% escaping AI block
@@ -295,15 +295,15 @@ async def try_enter(symbol: str) -> bool:
     else:
         # Normal mode: full bullish gate stack
         # ── V20.8: Gap Day Mode ──────────────────────────────────────────────────
-        # On gap-up days, intraday ATR is compressed and EMAs lag — both are false
-        # negatives. Use 4 gap-specific guards instead:
-        #   1. price > ema_fast AND ema_slow   (gap holding, not fading)
-        #   2. price >= vwap                   (institutional support)
-        #   3. abs(dist_from_vwap) <= tiered   (not extended, not too far below)
-        #   4. min ATR 0.2%                    (not a dead sideways stock)
-        # Guard 3 uses tiered thresholds: bigger gap = more room allowed.
+        # On gap-up days, intraday ATR is compressed and EMAs lag — both false
+        # negatives. Use 5 gap-specific guards instead:
+        #   1. price > ema_fast AND ema_slow       (gap holding)
+        #   2. price-to-EMA distance >= 0.2%       (real trend, not flat drift)
+        #   3. price >= vwap AND vwap slope > 0    (institutional support + rising)
+        #   4. abs(dist_from_vwap) <= tiered max   (not extended, not weak reclaim)
+        #   5. min ATR 0.2%                        (not a dead sideways stock)
         _gap_pct  = get_gap_pct(symbol)
-        _gap_day  = _gap_pct >= 0.5   # 0.5%+ gap at open = gap day
+        _gap_day  = _gap_pct >= 0.5
         if _gap_day:
             _price_now  = float(df["c"].iloc[-1])
             _ema_f_now  = float(df["ema_fast"].iloc[-1]) if "ema_fast" in df.columns else 0.0
@@ -317,36 +317,50 @@ async def try_enter(symbol: str) -> bool:
                     f"ema_fast={_ema_f_now:.2f} ema_slow={_ema_s_now:.2f})")
                 return False
 
-            # Guard 2: price at or above VWAP — institutional support
-            if _vwap_now > 0 and _price_now < _vwap_now:
-                log(f"[GAP DAY BLOCK] {symbol} | price below VWAP "
-                    f"(gap={_gap_pct:+.1f}% price={_price_now:.2f} vwap={_vwap_now:.2f})")
+            # Guard 2: minimum price-to-EMA distance — filters flat drift / weak trend
+            # price just barely above EMA = EMAs caught up = trend stalled
+            _ema_dist = (_price_now - _ema_f_now) / _price_now if _price_now > 0 else 0.0
+            if _ema_dist < 0.002:   # 0.2% minimum separation
+                log(f"[GAP DAY BLOCK] {symbol} | price too close to EMA — weak trend "
+                    f"(gap={_gap_pct:+.1f}% ema_dist={_ema_dist:.2%} < 0.20%)")
                 return False
 
-            # Guard 3: tiered VWAP distance — bigger gap earns more room,
-            # uses abs() so it also catches price drifting too far below after reclaim
+            # Guard 3: price at/above VWAP AND VWAP slope rising
             if _vwap_now > 0:
-                if   _gap_pct >= 2.0: _max_dist = 0.04   # strong gap  → 4% window
-                elif _gap_pct >= 1.0: _max_dist = 0.03   # medium gap  → 3% window
-                else:                 _max_dist = 0.02   # small gap   → 2% window
+                if _price_now < _vwap_now:
+                    log(f"[GAP DAY BLOCK] {symbol} | price below VWAP "
+                        f"(gap={_gap_pct:+.1f}% price={_price_now:.2f} vwap={_vwap_now:.2f})")
+                    return False
+                if len(df) >= 4:
+                    _vwap_slope = float(df["vwap"].iloc[-1]) - float(df["vwap"].iloc[-4])
+                    if _vwap_slope <= 0:
+                        log(f"[GAP DAY BLOCK] {symbol} | VWAP flat/declining — no trend "
+                            f"(gap={_gap_pct:+.1f}% slope={_vwap_slope:.3f})")
+                        return False
+
+            # Guard 4: tiered VWAP distance — abs() catches both overextension and
+            # weak reclaims; bigger gap earns more room
+            if _vwap_now > 0:
+                if   _gap_pct >= 2.0: _max_dist = 0.04
+                elif _gap_pct >= 1.0: _max_dist = 0.03
+                else:                 _max_dist = 0.02
                 _dist_vwap = abs(_price_now - _vwap_now) / _vwap_now
                 if _dist_vwap > _max_dist:
                     log(f"[GAP DAY BLOCK] {symbol} | too far from VWAP "
                         f"({_dist_vwap:.2%} > {_max_dist:.0%} for gap={_gap_pct:+.1f}%)")
                     return False
 
-            # Guard 4: minimum ATR floor — 0.2% keeps out dead sideways stocks
+            # Guard 5: minimum ATR floor — 0.2% avoids dead sideways stocks
             _atr_val = float(df["atr"].iloc[-1] or 0) if len(df) > 0 else 0.0
             _atr_pct = (_atr_val / _price_now) if _price_now > 0 else 0.0
             if _atr_pct < 0.002:
-                log(f"[GAP DAY BLOCK] {symbol} | ATR too dead "
-                    f"({_atr_pct:.2%} < 0.20%)")
+                log(f"[GAP DAY BLOCK] {symbol} | ATR too dead ({_atr_pct:.2%} < 0.20%)")
                 return False
 
-            _dist_log = (abs(_price_now - _vwap_now) / _vwap_now) if _vwap_now > 0 else 0.0
+            _signed_dist = (_price_now - _vwap_now) / _vwap_now if _vwap_now > 0 else 0.0
             log(f"[GAP DAY PASS] {symbol} | gap={_gap_pct:+.1f}% "
-                f"dist_vwap={(_price_now-_vwap_now)/_vwap_now if _vwap_now else 0:+.2%} "
-                f"max_dist={_max_dist:.0%} atr={_atr_pct:.2%}")
+                f"dist_vwap={_signed_dist:+.2%} max={_max_dist:.0%} "
+                f"ema_dist={_ema_dist:.2%} atr={_atr_pct:.2%}")
         else:
             # ── Normal (non-gap) gate stack ─────────────────────────────────────
             if not _has_cross:
