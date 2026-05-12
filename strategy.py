@@ -3,7 +3,7 @@ strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
 MODULE_VERSION = "V20.8"
-# V20.8: Gap Day Mode — 5 guards (EMA hold, EMA dist, VWAP+slope, tiered abs-dist, min-ATR)
+# V20.8: Gap Day Mode — 5 guards with slow-EMA dist + normalized VWAP slope
 # V20.7: del_position import fix + VWAP block untrained + qty_available orphan at fill
 # V20.6: AI sizing-only (not blocking) + relaxed CHOP + VWAP/volume reduce not block
 # V20.4: Block entries on fallback features (3-item price/volume) — fixes ai=-100% escaping AI block
@@ -296,12 +296,12 @@ async def try_enter(symbol: str) -> bool:
         # Normal mode: full bullish gate stack
         # ── V20.8: Gap Day Mode ──────────────────────────────────────────────────
         # On gap-up days, intraday ATR is compressed and EMAs lag — both false
-        # negatives. Use 5 gap-specific guards instead:
-        #   1. price > ema_fast AND ema_slow       (gap holding)
-        #   2. price-to-EMA distance >= 0.2%       (real trend, not flat drift)
-        #   3. price >= vwap AND vwap slope > 0    (institutional support + rising)
-        #   4. abs(dist_from_vwap) <= tiered max   (not extended, not weak reclaim)
-        #   5. min ATR 0.2%                        (not a dead sideways stock)
+        # negatives. 5 gap-specific guards instead:
+        #   1. price > ema_fast AND ema_slow           (gap holding)
+        #   2. price-to-slow-EMA distance >= 0.2%      (real trend vs flat drift)
+        #   3. price >= vwap AND vwap slope > -0.05%   (institutional trend, allows slow accumulation)
+        #   4. abs(dist_from_vwap) <= tiered max       (not extended, not weak reclaim)
+        #   5. min ATR 0.2%                            (not a dead sideways stock)
         _gap_pct  = get_gap_pct(symbol)
         _gap_day  = _gap_pct >= 0.5
         if _gap_day:
@@ -317,25 +317,28 @@ async def try_enter(symbol: str) -> bool:
                     f"ema_fast={_ema_f_now:.2f} ema_slow={_ema_s_now:.2f})")
                 return False
 
-            # Guard 2: minimum price-to-EMA distance — filters flat drift / weak trend
-            # price just barely above EMA = EMAs caught up = trend stalled
-            _ema_dist = (_price_now - _ema_f_now) / _price_now if _price_now > 0 else 0.0
-            if _ema_dist < 0.002:   # 0.2% minimum separation
-                log(f"[GAP DAY BLOCK] {symbol} | price too close to EMA — weak trend "
+            # Guard 2: price-to-SLOW-EMA distance >= 0.2%
+            # Uses slow EMA (not fast) — fast EMA moves quickly and gives false confidence.
+            # Slow EMA distance = real trend strength vs EMAs catching up after flat drift.
+            _ema_dist = (_price_now - _ema_s_now) / _price_now if _price_now > 0 else 0.0
+            if _ema_dist < 0.002:
+                log(f"[GAP DAY BLOCK] {symbol} | price too close to slow EMA — weak trend "
                     f"(gap={_gap_pct:+.1f}% ema_dist={_ema_dist:.2%} < 0.20%)")
                 return False
 
-            # Guard 3: price at/above VWAP AND VWAP slope rising
+            # Guard 3: price at/above VWAP AND VWAP not in real decline
+            # Slope normalized by VWAP price: allows near-flat accumulation,
+            # blocks genuine distribution (slope <= -0.05%)
             if _vwap_now > 0:
                 if _price_now < _vwap_now:
                     log(f"[GAP DAY BLOCK] {symbol} | price below VWAP "
                         f"(gap={_gap_pct:+.1f}% price={_price_now:.2f} vwap={_vwap_now:.2f})")
                     return False
                 if len(df) >= 4:
-                    _vwap_slope = float(df["vwap"].iloc[-1]) - float(df["vwap"].iloc[-4])
-                    if _vwap_slope <= 0:
-                        log(f"[GAP DAY BLOCK] {symbol} | VWAP flat/declining — no trend "
-                            f"(gap={_gap_pct:+.1f}% slope={_vwap_slope:.3f})")
+                    _vwap_slope = (float(df["vwap"].iloc[-1]) - float(df["vwap"].iloc[-4])) / _vwap_now
+                    if _vwap_slope <= -0.0005:   # normalized -0.05% — blocks real decline, allows flat
+                        log(f"[GAP DAY BLOCK] {symbol} | VWAP declining "
+                            f"(gap={_gap_pct:+.1f}% slope={_vwap_slope:.4%})")
                         return False
 
             # Guard 4: tiered VWAP distance — abs() catches both overextension and
