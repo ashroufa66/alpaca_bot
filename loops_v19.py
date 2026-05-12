@@ -1,7 +1,7 @@
 """
 loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V20.5"
+MODULE_VERSION = "V20.7"
 # V19.5 fixes:
 #   1. position_reconciliation_loop — every 5 min, compares state["positions"]
 #      against Alpaca's actual positions. Auto-removes ghosts (qty=0 in Alpaca).
@@ -479,13 +479,18 @@ async def entry_loop():
                         break
                     if await try_enter(symbol):
                         entries_done += 1
-                if entries_done < MAX_NEW_ENTRIES_PER_CYCLE:
+                # V20.7: Block VWAP reversion when model is untrained —
+                # prevents ai=-100% entries from fallback features path
+                if entries_done < MAX_NEW_ENTRIES_PER_CYCLE and state.get("vwap_trained", False):
                     for symbol in list(state["scanner_candidates"]):
                         if entries_done >= MAX_NEW_ENTRIES_PER_CYCLE:
                             break
                         if symbol not in state["positions"]:
                             if await try_enter_vwap_reversion(symbol):
                                 entries_done += 1
+                elif entries_done < MAX_NEW_ENTRIES_PER_CYCLE and not state.get("vwap_trained", False):
+                    _vwap_n = len(state.get("vwap_train_data", []))
+                    log(f"[VWAP BLOCK] Model untrained ({_vwap_n}/{VWAP_MODEL_MIN_SAMPLES}) — VWAP reversion entries disabled")
                 for oid, chase in list(state["smart_exec_orders"].items()):
                     if time.time() > chase.get("deadline", 0):
                         state["smart_exec_orders"].pop(oid, None)
@@ -705,9 +710,10 @@ async def prefetch_historical_bars():
 
 async def main():
     log("=" * 65)
-    log("Quantitative Trading Bot V20.5 — Starting up")
+    log("Quantitative Trading Bot V20.7 — Starting up")
     check_module_versions()
     log("─" * 65)
+    log("V20.7 — VWAP block when untrained | qty_available orphan fix at fill time | del_position NameError fix")
     log("V20.5 — qty_available restore fix | no more 403 sell loops on unsettled shares")
     log("V20.4 — Fallback features hard block | true ai=-100% prevention")
     log("V20.2 — Hard Alpaca sell guard | fix version cache display")
