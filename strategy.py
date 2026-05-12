@@ -2,7 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.6"
+MODULE_VERSION = "V20.7"
 # V20.6: AI sizing-only (not blocking) + relaxed CHOP + VWAP/volume reduce not block
 # V20.4: Block entries on fallback features (3-item price/volume) — fixes ai=-100% escaping AI block
 import os, json, time, math, asyncio, csv
@@ -16,7 +16,7 @@ import aiohttp
 import websockets
 import urllib.request, urllib.error
 from config import *
-from state import state, add_pending, remove_pending, discard_pending_symbol
+from state import state, add_pending, remove_pending, discard_pending_symbol, del_position
 from broker import (log, async_submit_market_order, async_submit_limit_order,
                      cancel_order, get_sector, in_cooldown, reentry_blocked, set_cooldown,
                      block_reentry, sync_positions, refresh_account,
