@@ -2,7 +2,9 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.7"
+MODULE_VERSION = "V20.8"
+# V20.8: Gap Day Mode — ATR/EMA-sep replaced by price>EMAs+VWAP on gap>=0.5% days
+# V20.7: del_position import fix + VWAP block untrained + qty_available orphan at fill
 # V20.6: AI sizing-only (not blocking) + relaxed CHOP + VWAP/volume reduce not block
 # V20.4: Block entries on fallback features (3-item price/volume) — fixes ai=-100% escaping AI block
 import os, json, time, math, asyncio, csv
@@ -292,15 +294,47 @@ async def try_enter(symbol: str) -> bool:
         ob_imbalance = 0.0   # skip OB check in bear — bearish imbalance is expected
     else:
         # Normal mode: full bullish gate stack
-        if not _has_cross:
-            if _intraday_str < MOMENTUM_MED:
-                log(f"[DEBUG BLOCK] {symbol} | no EMA cross + weak momentum "
-                    f"(strength={_intraday_str:.2f})")
+        # ── V20.8: Gap Day Mode ──────────────────────────────────────────────────
+        # On gap-up days, intraday ATR is compressed (price moved at open, then
+        # consolidates) and EMAs lag behind price — both are false negatives.
+        # Replace with: price > ema_fast AND price > ema_slow (gap holding),
+        # plus price >= VWAP (institutional money staying in = quality gate).
+        _gap_pct  = get_gap_pct(symbol)
+        _gap_day  = _gap_pct >= 0.5   # 0.5%+ gap at open = gap day
+        if _gap_day:
+            _price_now  = float(df["c"].iloc[-1])
+            _ema_f_now  = float(df["ema_fast"].iloc[-1]) if "ema_fast" in df.columns else 0.0
+            _ema_s_now  = float(df["ema_slow"].iloc[-1]) if "ema_slow" in df.columns else 0.0
+            _above_emas = _price_now > _ema_f_now > 0 and _price_now > _ema_s_now > 0
+            _vwap_now   = float(df["vwap"].iloc[-1]) if "vwap" in df.columns else 0.0
+            _above_vwap = _vwap_now > 0 and _price_now >= _vwap_now
+            if not _above_emas:
+                log(f"[GAP DAY BLOCK] {symbol} | price not above both EMAs "
+                    f"(gap={_gap_pct:+.1f}% price={_price_now:.2f} "
+                    f"ema_fast={_ema_f_now:.2f} ema_slow={_ema_s_now:.2f})")
+                return False
+            if not _above_vwap:
+                log(f"[GAP DAY BLOCK] {symbol} | price below VWAP "
+                    f"(gap={_gap_pct:+.1f}% price={_price_now:.2f} vwap={_vwap_now:.2f})")
+                return False
+            log(f"[GAP DAY PASS] {symbol} | gap={_gap_pct:+.1f}% — ATR/EMA-sep relaxed, "
+                f"price above EMAs+VWAP confirmed")
+            # ATR and EMA-sep skipped — gap is the volatility/trend signal
+        else:
+            # ── Normal (non-gap) gate stack ─────────────────────────────────────
+            if not _has_cross:
+                if _intraday_str < MOMENTUM_MED:
+                    log(f"[DEBUG BLOCK] {symbol} | no EMA cross + weak momentum "
+                        f"(strength={_intraday_str:.2f})")
+                    return False
+
+            if not _has_sep and _signals_ok < 2:
+                log(f"[DEBUG BLOCK] {symbol} | EMA not separated + only {_signals_ok}/3 signals")
                 return False
 
-        if not _has_sep and _signals_ok < 2:
-            log(f"[DEBUG BLOCK] {symbol} | EMA not separated + only {_signals_ok}/3 signals")
-            return False
+            if not atr_ok(df):
+                log(f"[DEBUG BLOCK] {symbol} | ATR too small")
+                return False
 
         if not _has_volume and _intraday_str < MOMENTUM_WEAK:
             log(f"[WEAK SETUP] {symbol} | no volume spike + weak momentum "
@@ -313,10 +347,6 @@ async def try_enter(symbol: str) -> bool:
                 # V20.6: don't block on VWAP — reduce size instead
                 log(f"[WEAK SETUP] {symbol} | VWAP not confirmed + strength={_intraday_str:.2f} → size×0.70")
                 state.setdefault("_weak_setup", set()).add(symbol)
-
-        if not atr_ok(df):
-            log(f"[DEBUG BLOCK] {symbol} | ATR too small")
-            return False
 
         _ok, _reason = entry_quality_ok(symbol, df)
         if not _ok:
