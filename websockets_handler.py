@@ -1,7 +1,7 @@
 """
 websockets_handler.py — Market data WebSocket and order update WebSocket.
 """
-MODULE_VERSION = "V19.3"
+MODULE_VERSION = "V20.7"
 import os, json, time, math, asyncio
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -44,6 +44,37 @@ from models import (ai_record_outcome, record_trade_outcome, update_recent_outco
                     cancel_broker_stop,
                     calc_kelly_fraction)
 from strategy import cleanup_old_orders, close_all_positions, try_exit
+
+
+# =========================================================
+# V20.7: QTY_AVAILABLE CHECK AFTER BUY FILL
+# Newly filled shares can be immediately unsettled (qty_available=0).
+# This causes instant 403 sell loops. Check 3s after fill — if Alpaca
+# shows available=0, mark as orphan so watchdog/EOD handles it cleanly.
+# =========================================================
+
+async def _check_qty_available_after_fill(symbol: str, filled_qty: int):
+    await asyncio.sleep(3)  # brief delay for Alpaca to settle fill state
+    try:
+        from broker import safe_api_call, TRADE_BASE_URL
+        resp = await safe_api_call("GET", f"{TRADE_BASE_URL}/v2/positions/{symbol}",
+                                   log_label=f"qty_avail_{symbol}", max_attempts=2)
+        if resp is None or resp.status != 200:
+            return
+        data = await resp.json()
+        qty_available = int(float(data.get("qty_available", filled_qty) or filled_qty))
+        if qty_available <= 0:
+            log(f"[QTY_AVAIL] {symbol}: filled qty={filled_qty} but available=0 "
+                f"— shares unsettled, marking orphan (EOD/watchdog will close)")
+            state.setdefault("orphan_positions", set()).add(symbol)
+        elif qty_available < filled_qty:
+            log(f"[QTY_AVAIL] {symbol}: total={filled_qty} available={qty_available} "
+                f"— partial settlement, updating position qty")
+            from state import update_position_field
+            await update_position_field(symbol, "qty", qty_available)
+    except Exception as e:
+        log(f"[QTY_AVAIL] {symbol}: check error — {e}")
+
 
 async def market_data_ws():
     """
@@ -478,6 +509,11 @@ async def order_updates_ws():
                                 ai_prob        = order_meta.get("ai_prob", -1.0),
                             )
                             log(f"[SUPABASE] open_positions saved for {symbol}")
+                            # V20.7: Check qty_available at fill time — newly bought shares
+                            # are sometimes immediately unsettled (qty_available=0), which
+                            # causes 403 sell loops. Detect this early and mark as orphan
+                            # so the watchdog handles via EOD bulk-close only.
+                            asyncio.ensure_future(_check_qty_available_after_fill(symbol, filled_qty))
 
                         elif side == "sell":
                             prev_seen = int(order_meta.get("filled_qty_seen", 0))
@@ -565,7 +601,3 @@ async def order_updates_ws():
         except Exception as e:
             log(f"Order WebSocket error: {e}")
             await asyncio.sleep(5)
-
-
-
-
