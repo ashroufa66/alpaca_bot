@@ -363,7 +363,7 @@ async def try_enter(symbol: str) -> bool:
             _signed_dist = (_price_now - _vwap_now) / _vwap_now if _vwap_now > 0 else 0.0
             log(f"[GAP DAY PASS] {symbol} | gap={_gap_pct:+.1f}% "
                 f"dist_vwap={_signed_dist:+.2%} max={_max_dist:.0%} "
-                f"ema_dist={_ema_dist:.2%} atr={_atr_pct:.2%}")
+                f"ema_dist={_ema_dist:.2%} atr={_atr_pct:.2%} regime={regime}")
         else:
             # ── Normal (non-gap) gate stack ─────────────────────────────────────
             if not _has_cross:
