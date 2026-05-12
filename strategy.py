@@ -3,7 +3,7 @@ strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
 MODULE_VERSION = "V20.8"
-# V20.8: Gap Day Mode — ATR/EMA-sep replaced by price>EMAs+VWAP on gap>=0.5% days
+# V20.8: Gap Day Mode — ATR/EMA-sep replaced by 4 gap guards (EMAs, VWAP, extension, min-ATR)
 # V20.7: del_position import fix + VWAP block untrained + qty_available orphan at fill
 # V20.6: AI sizing-only (not blocking) + relaxed CHOP + VWAP/volume reduce not block
 # V20.4: Block entries on fallback features (3-item price/volume) — fixes ai=-100% escaping AI block
@@ -295,31 +295,53 @@ async def try_enter(symbol: str) -> bool:
     else:
         # Normal mode: full bullish gate stack
         # ── V20.8: Gap Day Mode ──────────────────────────────────────────────────
-        # On gap-up days, intraday ATR is compressed (price moved at open, then
-        # consolidates) and EMAs lag behind price — both are false negatives.
-        # Replace with: price > ema_fast AND price > ema_slow (gap holding),
-        # plus price >= VWAP (institutional money staying in = quality gate).
+        # On gap-up days, intraday ATR is compressed and EMAs lag — both false
+        # negatives. Replace with three gap-specific guards:
+        #   1. price > ema_fast AND ema_slow  (gap is holding, not fading)
+        #   2. price >= vwap                  (institutional money staying in)
+        #   3. distance_from_vwap <= 3%       (not chasing an extended move)
+        # Also keep a minimum ATR floor (0.2%) to avoid dead sideways stocks.
         _gap_pct  = get_gap_pct(symbol)
         _gap_day  = _gap_pct >= 0.5   # 0.5%+ gap at open = gap day
         if _gap_day:
             _price_now  = float(df["c"].iloc[-1])
             _ema_f_now  = float(df["ema_fast"].iloc[-1]) if "ema_fast" in df.columns else 0.0
             _ema_s_now  = float(df["ema_slow"].iloc[-1]) if "ema_slow" in df.columns else 0.0
+            _vwap_now   = float(df["vwap"].iloc[-1])     if "vwap"     in df.columns else 0.0
+
+            # Guard 1: price must be above both EMAs (gap holding, not fading)
             _above_emas = _price_now > _ema_f_now > 0 and _price_now > _ema_s_now > 0
-            _vwap_now   = float(df["vwap"].iloc[-1]) if "vwap" in df.columns else 0.0
-            _above_vwap = _vwap_now > 0 and _price_now >= _vwap_now
             if not _above_emas:
                 log(f"[GAP DAY BLOCK] {symbol} | price not above both EMAs "
                     f"(gap={_gap_pct:+.1f}% price={_price_now:.2f} "
                     f"ema_fast={_ema_f_now:.2f} ema_slow={_ema_s_now:.2f})")
                 return False
-            if not _above_vwap:
+
+            # Guard 2: price must be at or above VWAP (institutional support)
+            if _vwap_now > 0 and _price_now < _vwap_now:
                 log(f"[GAP DAY BLOCK] {symbol} | price below VWAP "
                     f"(gap={_gap_pct:+.1f}% price={_price_now:.2f} vwap={_vwap_now:.2f})")
                 return False
-            log(f"[GAP DAY PASS] {symbol} | gap={_gap_pct:+.1f}% — ATR/EMA-sep relaxed, "
-                f"price above EMAs+VWAP confirmed")
-            # ATR and EMA-sep skipped — gap is the volatility/trend signal
+
+            # Guard 3: not too extended — block if >3% above VWAP (chasing)
+            if _vwap_now > 0:
+                _dist_vwap = (_price_now - _vwap_now) / _vwap_now
+                if _dist_vwap > 0.03:
+                    log(f"[GAP DAY BLOCK] {symbol} | too extended above VWAP "
+                        f"({_dist_vwap:.2%} > 3.0% — chasing risk)")
+                    return False
+
+            # Guard 4: minimum ATR floor — avoid dead sideways stocks
+            _atr_val = float(df["atr"].iloc[-1] or 0) if len(df) > 0 else 0.0
+            _atr_pct = (_atr_val / _price_now) if _price_now > 0 else 0.0
+            if _atr_pct < 0.002:   # 0.2% minimum — much looser than normal 0.25%
+                log(f"[GAP DAY BLOCK] {symbol} | ATR too dead "
+                    f"({_atr_pct:.2%} < 0.20% — no intraday range)")
+                return False
+
+            log(f"[GAP DAY PASS] {symbol} | gap={_gap_pct:+.1f}% "
+                f"dist_vwap={(_price_now-_vwap_now)/_vwap_now if _vwap_now else 0:.2%} "
+                f"atr={_atr_pct:.2%} — above EMAs+VWAP, not extended")
         else:
             # ── Normal (non-gap) gate stack ─────────────────────────────────────
             if not _has_cross:
