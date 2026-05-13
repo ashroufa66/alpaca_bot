@@ -52,40 +52,36 @@ from state import del_position, set_position
 # =========================================================
 
 def check_module_versions():
-    import importlib, sys
+    import re as _re, os as _os
     log("=" * 65)
     log("MODULE VERSIONS DEPLOYED")
-    log("─" * 65)
+    log("-" * 65)
     mods = ["config","state","broker","indicators","scanner",
             "microstructure","database","models","strategy",
             "websockets_handler","loops_v19"]
+    # V20.8: Read MODULE_VERSION directly from .py source file on disk.
+    # importlib.reload() returns in-memory cached versions even after
+    # a fresh Railway deploy — reading the file bypasses cache entirely.
     for mod_name in mods:
         try:
-            if mod_name in sys.modules:
-                mod = sys.modules[mod_name]
-                # V20.2: invalidate bytecode cache so reload reads the actual .py file
-                # Without this, importlib.reload() returns the cached .pyc version
-                # and shows a stale MODULE_VERSION even after a fresh deployment.
-                spec = getattr(mod, "__spec__", None)
-                if spec and spec.origin:
-                    importlib.invalidate_caches()
-                mod = importlib.reload(mod)
-            else:
-                mod = importlib.import_module(mod_name)
-            ver = getattr(mod, "MODULE_VERSION", "MISSING")
-            log(f"  📦 {mod_name:<22} {ver}")
+            path = mod_name + ".py"
+            if not _os.path.exists(path):
+                log(f"  ?? {mod_name:<22} (file not found)")
+                continue
+            ver = "NOT SET"
+            with open(path, "r") as fh:
+                for src_line in fh:
+                    src_line = src_line.strip()
+                    if src_line.startswith("MODULE_VERSION"):
+                        ver = src_line.split("=", 1)[-1].strip().strip('"\' ')
+                        break
+            log(f"  >> {mod_name:<22} {ver}")
         except Exception as e:
-            log(f"  ❌ {mod_name:<22} ERROR: {e}")
-    log("─" * 65)
-    log("✅ Module check complete — safe to trade")
+            log(f"  !! {mod_name:<22} ERROR: {e}")
+    log("-" * 65)
+    log("Module check complete - safe to trade")
     log("=" * 65)
     return True
-
-
-# =========================================================
-# ADAPTIVE CIRCUIT BREAKER THRESHOLD
-# =========================================================
-
 def get_cb_threshold() -> int:
     vix_regime = state.get("vix_proxy_regime", "normal")
     if vix_regime in ("high", "extreme"):
