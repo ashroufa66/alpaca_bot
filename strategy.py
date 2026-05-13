@@ -2,7 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.9"
+MODULE_VERSION = "V20.9b"
 # V20.9: Gap fallback calc from bars (fixes IEX volume-confirm failure = gap=0 always)
 # V20.8: Gap Day Mode — 5 guards with slow-EMA dist + normalized VWAP slope
 # V20.7: del_position import fix + VWAP block untrained + qty_available orphan at fill
@@ -303,17 +303,24 @@ async def try_enter(symbol: str) -> bool:
         #   3. price >= vwap AND vwap slope > -0.05%   (institutional trend, allows slow accumulation)
         #   4. abs(dist_from_vwap) <= tiered max       (not extended, not weak reclaim)
         #   5. min ATR 0.2%                            (not a dead sideways stock)
-        # V20.9: get_gap_pct() returns 0 when IEX volume confirmation fails
-        # (IEX free tier delivers sampled data — first bar volume often too low
-        # to pass the 2x confirmation threshold, so gap_data never gets stored).
-        # Fallback: calculate gap directly from bars using prev_close vs today's open.
-        _gap_pct = get_gap_pct(symbol)   # try confirmed gap first
-        if _gap_pct == 0.0 and len(df) >= 2:
-            # Direct calculation: today's first bar open vs yesterday's last close
-            _today_open  = float(df["o"].iloc[0])   if "o" in df.columns else 0.0
-            _prev_cls    = float(df["c"].iloc[-2])   if len(df) >= 2 else 0.0
+        # V20.9: get_gap_pct() returns 0 when IEX volume confirmation fails.
+        # V20.9b: df only contains intraday bars — df["c"].iloc[-2] is NOT
+        # yesterday's close, it's a recent intraday bar. Use state["prev_close"]
+        # (populated by microstructure.update_prev_close on first bar) combined
+        # with today's first bar open for a reliable gap calculation.
+        _gap_pct = get_gap_pct(symbol)   # try confirmed gap first (needs vol confirm)
+        if _gap_pct == 0.0:
+            _prev_cls   = float(state.get("prev_close", {}).get(symbol, 0) or 0)
+            _today_open = float(df["o"].iloc[0]) if len(df) > 0 and "o" in df.columns else 0.0
             if _today_open > 0 and _prev_cls > 0:
                 _gap_pct = ((_today_open - _prev_cls) / _prev_cls) * 100.0
+            elif _today_open == 0.0 and len(df) > 0 and "c" in df.columns:
+                # Last resort: compare current price to VWAP as gap proxy
+                # VWAP starts at open so price >> VWAP = gap day
+                _cur_price = float(df["c"].iloc[-1])
+                _vwap_val  = float(df["vwap"].iloc[-1]) if "vwap" in df.columns else 0.0
+                if _vwap_val > 0 and _cur_price > 0:
+                    _gap_pct = ((_cur_price - _vwap_val) / _vwap_val) * 100.0
         _gap_day  = _gap_pct >= 0.5
         if _gap_day:
             _price_now  = float(df["c"].iloc[-1])
