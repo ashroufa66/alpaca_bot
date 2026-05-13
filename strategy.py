@@ -2,7 +2,8 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.8"
+MODULE_VERSION = "V20.9"
+# V20.9: Gap fallback calc from bars (fixes IEX volume-confirm failure = gap=0 always)
 # V20.8: Gap Day Mode — 5 guards with slow-EMA dist + normalized VWAP slope
 # V20.7: del_position import fix + VWAP block untrained + qty_available orphan at fill
 # V20.6: AI sizing-only (not blocking) + relaxed CHOP + VWAP/volume reduce not block
@@ -302,7 +303,17 @@ async def try_enter(symbol: str) -> bool:
         #   3. price >= vwap AND vwap slope > -0.05%   (institutional trend, allows slow accumulation)
         #   4. abs(dist_from_vwap) <= tiered max       (not extended, not weak reclaim)
         #   5. min ATR 0.2%                            (not a dead sideways stock)
-        _gap_pct  = get_gap_pct(symbol)
+        # V20.9: get_gap_pct() returns 0 when IEX volume confirmation fails
+        # (IEX free tier delivers sampled data — first bar volume often too low
+        # to pass the 2x confirmation threshold, so gap_data never gets stored).
+        # Fallback: calculate gap directly from bars using prev_close vs today's open.
+        _gap_pct = get_gap_pct(symbol)   # try confirmed gap first
+        if _gap_pct == 0.0 and len(df) >= 2:
+            # Direct calculation: today's first bar open vs yesterday's last close
+            _today_open  = float(df["o"].iloc[0])   if "o" in df.columns else 0.0
+            _prev_cls    = float(df["c"].iloc[-2])   if len(df) >= 2 else 0.0
+            if _today_open > 0 and _prev_cls > 0:
+                _gap_pct = ((_today_open - _prev_cls) / _prev_cls) * 100.0
         _gap_day  = _gap_pct >= 0.5
         if _gap_day:
             _price_now  = float(df["c"].iloc[-1])
@@ -363,7 +374,7 @@ async def try_enter(symbol: str) -> bool:
             _signed_dist = (_price_now - _vwap_now) / _vwap_now if _vwap_now > 0 else 0.0
             log(f"[GAP DAY PASS] {symbol} | gap={_gap_pct:+.1f}% "
                 f"dist_vwap={_signed_dist:+.2%} max={_max_dist:.0%} "
-                f"ema_dist={_ema_dist:.2%} atr={_atr_pct:.2%} regime={regime}")
+                f"ema_dist={_ema_dist:.2%} atr={_atr_pct:.2%}")
         else:
             # ── Normal (non-gap) gate stack ─────────────────────────────────────
             if not _has_cross:
