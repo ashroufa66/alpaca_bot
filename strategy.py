@@ -2,8 +2,9 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.9b"
-# V20.9: Gap fallback calc from bars (fixes IEX volume-confirm failure = gap=0 always)
+MODULE_VERSION = "V20.9c"
+# V20.9c: Gap Day ATR floor 0.20%→0.10% (ARM-type consolidation was blocked)
+# V20.9b: Gap fallback uses state[prev_close] — IEX vol-confirm was always failing
 # V20.8: Gap Day Mode — 5 guards with slow-EMA dist + normalized VWAP slope
 # V20.7: del_position import fix + VWAP block untrained + qty_available orphan at fill
 # V20.6: AI sizing-only (not blocking) + relaxed CHOP + VWAP/volume reduce not block
@@ -304,19 +305,14 @@ async def try_enter(symbol: str) -> bool:
         #   4. abs(dist_from_vwap) <= tiered max       (not extended, not weak reclaim)
         #   5. min ATR 0.2%                            (not a dead sideways stock)
         # V20.9: get_gap_pct() returns 0 when IEX volume confirmation fails.
-        # V20.9b: df only contains intraday bars — df["c"].iloc[-2] is NOT
-        # yesterday's close, it's a recent intraday bar. Use state["prev_close"]
-        # (populated by microstructure.update_prev_close on first bar) combined
-        # with today's first bar open for a reliable gap calculation.
-        _gap_pct = get_gap_pct(symbol)   # try confirmed gap first (needs vol confirm)
+        # V20.9b: Use state["prev_close"] + today's first bar open for reliable gap calc.
+        _gap_pct = get_gap_pct(symbol)
         if _gap_pct == 0.0:
             _prev_cls   = float(state.get("prev_close", {}).get(symbol, 0) or 0)
             _today_open = float(df["o"].iloc[0]) if len(df) > 0 and "o" in df.columns else 0.0
             if _today_open > 0 and _prev_cls > 0:
                 _gap_pct = ((_today_open - _prev_cls) / _prev_cls) * 100.0
-            elif _today_open == 0.0 and len(df) > 0 and "c" in df.columns:
-                # Last resort: compare current price to VWAP as gap proxy
-                # VWAP starts at open so price >> VWAP = gap day
+            elif len(df) > 0 and "c" in df.columns:
                 _cur_price = float(df["c"].iloc[-1])
                 _vwap_val  = float(df["vwap"].iloc[-1]) if "vwap" in df.columns else 0.0
                 if _vwap_val > 0 and _cur_price > 0:
@@ -371,11 +367,13 @@ async def try_enter(symbol: str) -> bool:
                         f"({_dist_vwap:.2%} > {_max_dist:.0%} for gap={_gap_pct:+.1f}%)")
                     return False
 
-            # Guard 5: minimum ATR floor — 0.2% avoids dead sideways stocks
+            # Guard 5: minimum ATR floor — 0.10% avoids truly dead stocks.
+            # V20.9c: lowered from 0.20% — consolidating gap stocks (ARM type) have
+            # 0.12-0.18% ATR after the initial move, dead stocks are 0.02-0.05%.
             _atr_val = float(df["atr"].iloc[-1] or 0) if len(df) > 0 else 0.0
             _atr_pct = (_atr_val / _price_now) if _price_now > 0 else 0.0
-            if _atr_pct < 0.002:
-                log(f"[GAP DAY BLOCK] {symbol} | ATR too dead ({_atr_pct:.2%} < 0.20%)")
+            if _atr_pct < 0.001:
+                log(f"[GAP DAY BLOCK] {symbol} | ATR too dead ({_atr_pct:.2%} < 0.10%)")
                 return False
 
             _signed_dist = (_price_now - _vwap_now) / _vwap_now if _vwap_now > 0 else 0.0
