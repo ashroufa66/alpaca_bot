@@ -1,7 +1,7 @@
 """
 loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V20.7"
+MODULE_VERSION = "V20.9b"
 # V19.5 fixes:
 #   1. position_reconciliation_loop — every 5 min, compares state["positions"]
 #      against Alpaca's actual positions. Auto-removes ghosts (qty=0 in Alpaca).
@@ -52,35 +52,32 @@ from state import del_position, set_position
 # =========================================================
 
 def check_module_versions():
-    import re as _re, os as _os
+    import importlib, sys
     log("=" * 65)
     log("MODULE VERSIONS DEPLOYED")
-    log("-" * 65)
+    log("─" * 65)
     mods = ["config","state","broker","indicators","scanner",
             "microstructure","database","models","strategy",
             "websockets_handler","loops_v19"]
-    # V20.8: Read MODULE_VERSION directly from .py source file on disk.
-    # importlib.reload() was returning in-memory cached versions even after
-    # a fresh Railway deploy, causing all modules to show stale version strings.
     for mod_name in mods:
         try:
-            path = mod_name + ".py"
-            if not _os.path.exists(path):
-                log(f"  ?? {mod_name:<22} (file not found)")
-                continue
-            ver = "NOT SET"
-            with open(path, "r") as fh:
-                for src_line in fh:
-                    src_line = src_line.strip()
-                    if src_line.startswith("MODULE_VERSION"):
-                        m = _re.search(r'[A-Za-z0-9_.]+', src_line.split("=", 1)[-1].strip().strip('"\' '))
-                        ver = src_line.split("=", 1)[-1].strip().strip('"\' ')
-                        break
-            log(f"  >> {mod_name:<22} {ver}")
+            if mod_name in sys.modules:
+                mod = sys.modules[mod_name]
+                # V20.2: invalidate bytecode cache so reload reads the actual .py file
+                # Without this, importlib.reload() returns the cached .pyc version
+                # and shows a stale MODULE_VERSION even after a fresh deployment.
+                spec = getattr(mod, "__spec__", None)
+                if spec and spec.origin:
+                    importlib.invalidate_caches()
+                mod = importlib.reload(mod)
+            else:
+                mod = importlib.import_module(mod_name)
+            ver = getattr(mod, "MODULE_VERSION", "MISSING")
+            log(f"  📦 {mod_name:<22} {ver}")
         except Exception as e:
-            log(f"  !! {mod_name:<22} ERROR: {e}")
-    log("-" * 65)
-    log("Module check complete - safe to trade")
+            log(f"  ❌ {mod_name:<22} ERROR: {e}")
+    log("─" * 65)
+    log("✅ Module check complete — safe to trade")
     log("=" * 65)
     return True
 
@@ -707,13 +704,50 @@ async def prefetch_historical_bars():
                     }
                     _seeded += 1
         log(f"[PREFETCH] Seeded quotes for {_seeded} symbols from bars")
+
+        # V20.9b: Fetch yesterday's close for gap detection.
+        # state["prev_close"] is needed by strategy.py gap fallback calc.
+        # Prefetch only loads 60min intraday bars so prev_close is never set
+        # on mid-session restart — gap day mode was silently disabled every day.
+        _pc_loaded = 0
+        try:
+            import datetime as _dt
+            _today     = _dt.datetime.utcnow().date()
+            _day_start = (_today - _dt.timedelta(days=5)).isoformat()  # 5 days back covers weekends
+            for sym in symbols:
+                try:
+                    async with session.get(
+                        f"{DATA_BASE_URL}/v2/stocks/{sym}/bars",
+                        params={"timeframe": "1Day", "start": _day_start,
+                                "limit": 5, "feed": DATA_FEED, "sort": "desc"}
+                    ) as _r:
+                        if _r.status != 200:
+                            continue
+                        _d = await _r.json()
+                        _dbars = _d.get("bars", [])
+                        # bars sorted desc: [0]=today or latest, [1]=yesterday
+                        if len(_dbars) >= 2:
+                            _prev = float(_dbars[1].get("c", 0) or 0)
+                            if _prev > 0:
+                                state.setdefault("prev_close", {})[sym] = _prev
+                                _pc_loaded += 1
+                        elif len(_dbars) == 1:
+                            _prev = float(_dbars[0].get("c", 0) or 0)
+                            if _prev > 0:
+                                state.setdefault("prev_close", {})[sym] = _prev
+                                _pc_loaded += 1
+                except Exception:
+                    continue
+            log(f"[PREFETCH] Loaded prev_close for {_pc_loaded}/{len(symbols)} symbols — gap detection ready")
+        except Exception as _e:
+            log(f"[PREFETCH] prev_close load failed: {_e} — gap day mode may not fire")
     except Exception as e:
         log(f"[PREFETCH] Failed: {e} — will warmup from WS")
 
 
 async def main():
     log("=" * 65)
-    log("Quantitative Trading Bot V20.7 — Starting up")
+    log("Quantitative Trading Bot V20.9b — Starting up")
     check_module_versions()
     log("─" * 65)
     log("V20.7 — VWAP block when untrained | qty_available orphan fix at fill time | del_position NameError fix")
