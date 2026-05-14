@@ -1,7 +1,7 @@
 """
 websockets_handler.py — Market data WebSocket and order update WebSocket.
 """
-MODULE_VERSION = "V20.7"
+MODULE_VERSION = "V20.9d"
 import os, json, time, math, asyncio
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -67,6 +67,7 @@ async def _check_qty_available_after_fill(symbol: str, filled_qty: int):
             log(f"[QTY_AVAIL] {symbol}: filled qty={filled_qty} but available=0 "
                 f"— shares unsettled, marking orphan (EOD/watchdog will close)")
             state.setdefault("orphan_positions", set()).add(symbol)
+            state.setdefault("unsettled_positions", set()).add(symbol)  # V20.9d: skip sell attempts until EOD
         elif qty_available < filled_qty:
             log(f"[QTY_AVAIL] {symbol}: total={filled_qty} available={qty_available} "
                 f"— partial settlement, updating position qty")
