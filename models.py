@@ -1,7 +1,7 @@
 """
 models.py — XGBoost/RF momentum model, VWAP model, VWAP reversion entry.
 """
-MODULE_VERSION = "V19.2"
+MODULE_VERSION = "V20.9c"
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -42,7 +42,34 @@ def clip_features(features: List[float]) -> List[float]:
 def build_feature_vector(symbol: str, df: pd.DataFrame) -> Optional[List[float]]:
     detail = state["scanner_details"].get(symbol)
     if not detail:
-        return None
+        # V20.9c: Whitelist symbols have no scanner_details (score=0, not from organic scan).
+        # Synthesize a minimal detail dict from bars + quotes so we return 9 real features
+        # instead of None → fallback → AI BLOCK. Values are conservative (score=0, vol=0)
+        # so the AI sees them as low-conviction — correct for whitelist entries.
+        if df.empty or len(df) < 2:
+            return None   # truly no data — hard block is correct
+        try:
+            _close  = float(df["c"].iloc[-1] or 0)
+            _open   = float(df["c"].iloc[0]  or 0)   # first bar of session
+            _prev   = float(state.get("prev_close", {}).get(symbol, _open) or _open)
+            _day_chg = ((_close - _prev) / _prev * 100.0) if _prev > 0 else 0.0
+            _hi     = float(df["h"].max() or _close)
+            _lo     = float(df["l"].min() or _close)
+            _rng    = ((_hi - _lo) / _close * 100.0) if _close > 0 else 0.0
+            _q      = state.get("quotes", {}).get(symbol, {})
+            _bid    = float(_q.get("bp", 0) or 0)
+            _ask    = float(_q.get("ap", 0) or 0)
+            _spread = ((_ask - _bid) / _close * 100.0) if _close > 0 and _ask > _bid else 0.0
+            detail = {
+                "score":               0.0,      # whitelist = no momentum score
+                "relative_volume":     0.0,      # unknown without scanner
+                "day_change_pct":      _day_chg,
+                "minute_momentum_pct": _day_chg,
+                "spread_pct":          _spread,
+                "minute_range_pct":    _rng,
+            }
+        except Exception:
+            return None
     atr_pct = 0.0
     if not df.empty and len(df) >= ATR_PERIOD + 2:
         atr   = float(df["atr"].iloc[-1] or 0)
@@ -1317,4 +1344,3 @@ def get_winrate_factor() -> float:
         log(f"⚠️ WIN-RATE LOW: {winrate:.0%} in last {WINRATE_MEMORY_TRADES} trades → size {WINRATE_LOW_FACTOR:.0%}")
         return WINRATE_LOW_FACTOR
     return 1.0
-
