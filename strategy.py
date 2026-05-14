@@ -379,7 +379,7 @@ async def try_enter(symbol: str) -> bool:
             _signed_dist = (_price_now - _vwap_now) / _vwap_now if _vwap_now > 0 else 0.0
             log(f"[GAP DAY PASS] {symbol} | gap={_gap_pct:+.1f}% "
                 f"dist_vwap={_signed_dist:+.2%} max={_max_dist:.0%} "
-                f"ema_dist={_ema_dist:.2%} atr={_atr_pct:.2%} regime={regime}")
+                f"ema_dist={_ema_dist:.2%} atr={_atr_pct:.2%}")
         else:
             # ── Normal (non-gap) gate stack ─────────────────────────────────────
             if not _has_cross:
@@ -469,8 +469,6 @@ async def try_enter(symbol: str) -> bool:
     # indicator features. When only 3 price/volume fallback features are available
     # (IEX bars not built up yet), the model returns a garbage probability that
     # can pass the AI threshold. Block ALL entries with fallback features.
-    # Temp debug: shows pipeline state — remove once feature readiness confirmed
-    log(f"[FEAT] {symbol} bars={len(df)} feat_len={len(features)} fallback={_features_are_fallback}")
     if AI_BLOCK_NO_FEATURES and _features_are_fallback:
         log(f"[AI BLOCK] {symbol}: fallback features only — bars not ready, skipping entry")
         return False

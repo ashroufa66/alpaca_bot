@@ -654,14 +654,17 @@ async def prefetch_historical_bars():
     try:
         session  = state["http_session"]
         end_dt   = datetime.datetime.utcnow()
-        start_dt = end_dt - datetime.timedelta(minutes=60)
+        # V20.9c: Extend lookback to 1 day so prefetch works on mid-session
+        # restarts AND after-hours restarts. 60-min window returned 0 bars
+        # outside market hours, leaving feature pipeline empty at open.
+        start_dt = end_dt - datetime.timedelta(hours=24)
         loaded   = 0
         for sym in symbols:
             try:
                 params = {
                     "timeframe": "1Min",
                     "start":  start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "limit":  30,
+                    "limit":  120,   # 2x more bars — covers full session history
                     "feed":   DATA_FEED,
                     "sort":   "asc",
                 }
