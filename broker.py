@@ -1,7 +1,7 @@
 """
 broker.py — Alpaca REST API helpers, sector map, utility functions.
 """
-MODULE_VERSION = "V20.5"
+MODULE_VERSION = "V20.9d"
 # V20.5: Restore uses qty_available (settled shares) not qty (total) — fixes 403 sell loops
 # V20.0: REST fallback price fetch for IEX bar droughts
 # V18.6 fixes (last 5%):
@@ -896,6 +896,7 @@ async def sync_positions():
                 if qty_available <= 0:
                     log(f"[RESTORE SKIP QTY] {sym}: qty={qty} but available=0 — shares unsettled, marking orphan")
                     state.setdefault("orphan_positions", set()).add(sym)
+                    state.setdefault("unsettled_positions", set()).add(sym)  # V20.9d: skip sell attempts until EOD
                     qty_to_restore = qty   # keep full qty in state, watchdog will retry
                 elif qty_available < qty:
                     log(f"[RESTORE QTY FIX] {sym}: total={qty} available={qty_available} — using available qty")
