@@ -2,7 +2,8 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.9d"
+MODULE_VERSION = "V20.9e"
+# V20.9e: iex_no_data threshold 60s→300s + log fix (was silent kill)
 # V20.9c: Gap Day ATR floor 0.20%→0.10% (ARM-type consolidation was blocked)
 # V20.9b: Gap fallback uses state[prev_close] — IEX vol-confirm was always failing
 # V20.8: Gap Day Mode — 5 guards with slow-EMA dist + normalized VWAP slope
@@ -125,14 +126,15 @@ async def try_enter(symbol: str) -> bool:
         # If no quote for >60s after subscription, likely no IEX data for this symbol
         _sub_time = state.get("ws_last_reconnect", time.time())
         _wait_secs = time.time() - _sub_time
-        if _wait_secs > 60:
-            # No IEX data after 60s — add to session no-data list
+        if _wait_secs > 300:
+            # V20.9e: No IEX data after 300s (5 min) — add to session no-data list
+            # Was 60s — too aggressive, IEX often takes longer on slow days
             state.setdefault("iex_no_data", set()).add(symbol)
+            log(f"[IEX_SKIP] {symbol}: no quote after {_wait_secs:.0f}s — skipping for session")
             return False
     # Skip symbols confirmed to have no IEX data this session
     if symbol in state.get("iex_no_data", set()):
-        return False
-        _log_halt_once(symbol + "_noquote", f"[ENTRY_SKIP] {symbol}: no quote data yet (WS reconnecting?)")
+        _log_halt_once(symbol + "_noquote", f"[IEX_SKIP] {symbol}: no IEX data this session")
         return False
     # V17.8+: per-symbol 15s warmup after first quote — prevents stale fills
     if time.time() - state.get("quote_first_seen", {}).get(symbol, 0) < 15:
@@ -659,13 +661,6 @@ async def try_exit(symbol: str) -> bool:
     if _is_orphan:
         # mark orphan in state so broker 403 handler ignores it
         state.setdefault("orphan_positions", set()).add(symbol)
-        # V20.9c: If orphan was flagged due to qty_available=0 (unsettled shares),
-        # skip ALL sell attempts — they will all 403. EOD bulk-close handles it.
-        # Only allow EOD_EXIT which uses Alpaca bulk-close endpoint.
-        _unsettled = state.get("unsettled_positions", set())
-        if symbol in _unsettled:
-            if not await should_force_exit_before_close():
-                return False   # wait for EOD bulk-close, not individual sell
 
     # V17.8+: read pos under lock so we get a consistent snapshot
     async with state["lock"]:
