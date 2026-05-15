@@ -121,18 +121,16 @@ async def try_enter(symbol: str) -> bool:
         log(f"[GATE] {symbol} | {_reason}")
         return False
     if symbol not in state["quotes"]:
-        # V17.8+: track how long symbol has had no quote
-        # If no quote for >60s after subscription, likely no IEX data for this symbol
+        # V20.9e: raised 60s→300s — IEX takes longer on slow days
         _sub_time = state.get("ws_last_reconnect", time.time())
         _wait_secs = time.time() - _sub_time
-        if _wait_secs > 60:
-            # No IEX data after 60s — add to session no-data list
+        if _wait_secs > 300:
             state.setdefault("iex_no_data", set()).add(symbol)
+            log(f"[IEX_SKIP] {symbol}: no quote after {_wait_secs:.0f}s — skipping for session")
             return False
     # Skip symbols confirmed to have no IEX data this session
     if symbol in state.get("iex_no_data", set()):
-        return False
-        _log_halt_once(symbol + "_noquote", f"[ENTRY_SKIP] {symbol}: no quote data yet (WS reconnecting?)")
+        _log_halt_once(symbol + "_noquote", f"[IEX_SKIP] {symbol}: no IEX data this session")
         return False
     # V17.8+: per-symbol 15s warmup after first quote — prevents stale fills
     if time.time() - state.get("quote_first_seen", {}).get(symbol, 0) < 15:
@@ -563,7 +561,9 @@ async def try_enter(symbol: str) -> bool:
     # V20.0: BULL boost raises size — applied AFTER floor reductions
     if _bull_boost_active:
         combined_factor = combined_factor * _bull_size_factor
+    _raw_qty = qty  # V20.9f: capture before reduction
     qty = max(1, round(qty * combined_factor))
+    log(f"[FINAL SIZE] {symbol} raw={_raw_qty} final={qty} factor={combined_factor:.2f}")
 
     if combined_factor < 1.0 or _bull_boost_active:
         log(f"[SIZE] {symbol} | combined_factor={combined_factor:.2f} "
