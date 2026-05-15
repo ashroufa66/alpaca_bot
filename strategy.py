@@ -2,8 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.9e"
-# V20.9e: iex_no_data threshold 60s→300s + log fix (was silent kill)
+MODULE_VERSION = "V20.9f"
 # V20.9c: Gap Day ATR floor 0.20%→0.10% (ARM-type consolidation was blocked)
 # V20.9b: Gap fallback uses state[prev_close] — IEX vol-confirm was always failing
 # V20.8: Gap Day Mode — 5 guards with slow-EMA dist + normalized VWAP slope
@@ -126,15 +125,14 @@ async def try_enter(symbol: str) -> bool:
         # If no quote for >60s after subscription, likely no IEX data for this symbol
         _sub_time = state.get("ws_last_reconnect", time.time())
         _wait_secs = time.time() - _sub_time
-        if _wait_secs > 300:
-            # V20.9e: No IEX data after 300s (5 min) — add to session no-data list
-            # Was 60s — too aggressive, IEX often takes longer on slow days
+        if _wait_secs > 60:
+            # No IEX data after 60s — add to session no-data list
             state.setdefault("iex_no_data", set()).add(symbol)
-            log(f"[IEX_SKIP] {symbol}: no quote after {_wait_secs:.0f}s — skipping for session")
             return False
     # Skip symbols confirmed to have no IEX data this session
     if symbol in state.get("iex_no_data", set()):
-        _log_halt_once(symbol + "_noquote", f"[IEX_SKIP] {symbol}: no IEX data this session")
+        return False
+        _log_halt_once(symbol + "_noquote", f"[ENTRY_SKIP] {symbol}: no quote data yet (WS reconnecting?)")
         return False
     # V17.8+: per-symbol 15s warmup after first quote — prevents stale fills
     if time.time() - state.get("quote_first_seen", {}).get(symbol, 0) < 15:
@@ -222,12 +220,20 @@ async def try_enter(symbol: str) -> bool:
         detail_score = detail.get("score", 0) if detail else 0
 
         # Quick AI pre-check before expensive indicator calcs
-        _chop_ai = ai_predict_probability(build_feature_vector(symbol, get_indicators(symbol))) if state.get("ai_trained") else -1.0
+        _chop_ai_raw = ai_predict_probability(build_feature_vector(symbol, get_indicators(symbol))) if state.get("ai_trained") else -1.0
+        # V20.9e: AI model outputs pathologically low probs (0.32%) due to class imbalance
+        # (W164/L435 = 27% win rate causes XGBoost to collapse toward near-zero).
+        # Floor at 25% to prevent model saturation from killing all entries.
+        # When model improves (win rate >35%), remove this floor.
+        _chop_ai = max(_chop_ai_raw, 0.25) if _chop_ai_raw >= 0 else _chop_ai_raw
 
-        # Gate 1: AI confidence
+        # Gate 1: AI confidence — REDUCE size instead of hard block
+        # V20.9e: Changed from hard block to size reduction.
+        # Hard block recreates V19 overfiltering — AI was meant to be advisory (V20.6).
         if _chop_ai >= 0 and _chop_ai < CHOP_AI_MIN_PROB:
-            log(f"[CHOP BLOCK] {symbol} | AI={_chop_ai:.2%} < {CHOP_AI_MIN_PROB:.0%} required in CHOP")
-            return False
+            _chop_ai_factor = max(0.50, _chop_ai / CHOP_AI_MIN_PROB)
+            log(f"[CHOP REDUCE] {symbol} | AI={_chop_ai_raw:.2%} (floored={_chop_ai:.2%}) → size×{_chop_ai_factor:.0%}")
+            state.setdefault("_chop_ai_reduce", {})[symbol] = _chop_ai_factor
 
         # Gate 2: Scanner score (whitelist symbols with no detail are exempt)
         if detail and detail_score < CHOP_MIN_SCORE_STRICT:
@@ -538,7 +544,8 @@ async def try_enter(symbol: str) -> bool:
             return False
 
     # V18.9: Single unified min() factor — ALL reductions applied once, no cascade.
-    _chop_factor  = CHOP_SIZE_FACTOR if symbol in state.get("_chop_reduce", set()) else 1.0
+    _chop_factor      = CHOP_SIZE_FACTOR if symbol in state.get("_chop_reduce", set()) else 1.0
+    _chop_ai_factor_v = state.get("_chop_ai_reduce", {}).pop(symbol, 1.0)  # V20.9f: AI-based CHOP reduce
     _flow_factor  = 0.70 if not _flow_ok else 1.0
     _weak_factor  = 0.70 if symbol in state.get("_weak_setup", set()) else 1.0  # V20.6
     state.get("_chop_reduce", set()).discard(symbol)
@@ -546,6 +553,7 @@ async def try_enter(symbol: str) -> bool:
 
     combined_factor = min(
         _ai_size_factor,    # 0.65 if AI below threshold (V20.6: softer)
+        _chop_ai_factor_v,  # 0.50-1.0 if CHOP AI low (V20.9f: reduce not block)
         _conf_size_factor,  # 0.70 if conf low in CHOP
         _chop_factor,       # 0.70 if CHOP + weak score (V20.6: raised from 0.50)
         _flow_factor,       # 0.70 if thin order flow
