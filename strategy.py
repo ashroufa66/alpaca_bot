@@ -2,7 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.9g"
+MODULE_VERSION = "V20.9h"
 # V20.9c: Gap Day ATR floor 0.20%→0.10% (ARM-type consolidation was blocked)
 # V20.9b: Gap fallback uses state[prev_close] — IEX vol-confirm was always failing
 # V20.8: Gap Day Mode — 5 guards with slow-EMA dist + normalized VWAP slope
@@ -220,22 +220,12 @@ async def try_enter(symbol: str) -> bool:
         detail_score = detail.get("score", 0) if detail else 0
 
         # Quick AI pre-check before expensive indicator calcs
-        _chop_ai_raw = ai_predict_probability(build_feature_vector(symbol, get_indicators(symbol))) if state.get("ai_trained") else -1.0
+        _chop_ai = ai_predict_probability(build_feature_vector(symbol, get_indicators(symbol))) if state.get("ai_trained") else -1.0
 
         # Gate 1: AI confidence
-        # V20.9g: Two-tier AI logic:
-        #   < 5%  → hard block (model is certain this is bad)
-        #   5-52% → allow but reduce size (floor at 25% for sizing)
-        #   > 52% → full size
-        if _chop_ai_raw >= 0 and _chop_ai_raw < 0.05:
-            log(f"[CHOP BLOCK] {symbol} | AI={_chop_ai_raw:.2%} < 5% — model certain, blocking")
-            return False
-        # Floor at 25% for sizing only — prevents size collapse from class imbalance
-        _chop_ai = max(_chop_ai_raw, 0.25) if _chop_ai_raw >= 0 else _chop_ai_raw
         if _chop_ai >= 0 and _chop_ai < CHOP_AI_MIN_PROB:
-            _chop_ai_factor = max(0.50, _chop_ai / CHOP_AI_MIN_PROB)
-            log(f"[CHOP REDUCE] {symbol} | AI={_chop_ai_raw:.2%} (floored={_chop_ai:.2%}) → size×{_chop_ai_factor:.0%}")
-            state.setdefault("_chop_ai_reduce", {})[symbol] = _chop_ai_factor
+            log(f"[CHOP BLOCK] {symbol} | AI={_chop_ai:.2%} < {CHOP_AI_MIN_PROB:.0%} required in CHOP")
+            return False
 
         # Gate 2: Scanner score (whitelist symbols with no detail are exempt)
         if detail and detail_score < CHOP_MIN_SCORE_STRICT:
@@ -669,6 +659,11 @@ async def try_exit(symbol: str) -> bool:
     if _is_orphan:
         # mark orphan in state so broker 403 handler ignores it
         state.setdefault("orphan_positions", set()).add(symbol)
+        # V20.9g: If marked unsettled (qty_available=0), skip ALL sell attempts
+        # — every attempt returns 403. EOD bulk-close handles these.
+        if symbol in state.get("unsettled_positions", set()):
+            if not await should_force_exit_before_close():
+                return False   # wait for EOD bulk-close only
 
     # V17.8+: read pos under lock so we get a consistent snapshot
     async with state["lock"]:
