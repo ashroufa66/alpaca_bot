@@ -42,7 +42,28 @@ def clip_features(features: List[float]) -> List[float]:
 def build_feature_vector(symbol: str, df: pd.DataFrame) -> Optional[List[float]]:
     detail = state["scanner_details"].get(symbol)
     if not detail:
-        return None
+        # V20.9c: Whitelist symbols have no scanner_details.
+        # Synthesize minimal detail from bars + quotes so we return 9 real features.
+        if df.empty or len(df) < 2:
+            return None
+        try:
+            _close  = float(df["c"].iloc[-1] or 0)
+            _prev   = float(state.get("prev_close", {}).get(symbol, _close) or _close)
+            _day_chg = ((_close - _prev) / _prev * 100.0) if _prev > 0 else 0.0
+            _hi     = float(df["h"].max() or _close)
+            _lo     = float(df["l"].min() or _close)
+            _rng    = ((_hi - _lo) / _close * 100.0) if _close > 0 else 0.0
+            _q      = state.get("quotes", {}).get(symbol, {})
+            _bid    = float(_q.get("bp", 0) or 0)
+            _ask    = float(_q.get("ap", 0) or 0)
+            _spread = ((_ask - _bid) / _close * 100.0) if _close > 0 and _ask > _bid else 0.0
+            detail = {
+                "score": 0.0, "relative_volume": 0.0,
+                "day_change_pct": _day_chg, "minute_momentum_pct": _day_chg,
+                "spread_pct": _spread, "minute_range_pct": _rng,
+            }
+        except Exception:
+            return None
     atr_pct = 0.0
     if not df.empty and len(df) >= ATR_PERIOD + 2:
         atr   = float(df["atr"].iloc[-1] or 0)
