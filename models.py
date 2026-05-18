@@ -1,7 +1,7 @@
 """
 models.py — XGBoost/RF momentum model, VWAP model, VWAP reversion entry.
 """
-MODULE_VERSION = "V20.9c"
+MODULE_VERSION = "V20.9g"
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -42,34 +42,7 @@ def clip_features(features: List[float]) -> List[float]:
 def build_feature_vector(symbol: str, df: pd.DataFrame) -> Optional[List[float]]:
     detail = state["scanner_details"].get(symbol)
     if not detail:
-        # V20.9c: Whitelist symbols have no scanner_details (score=0, not from organic scan).
-        # Synthesize a minimal detail dict from bars + quotes so we return 9 real features
-        # instead of None → fallback → AI BLOCK. Values are conservative (score=0, vol=0)
-        # so the AI sees them as low-conviction — correct for whitelist entries.
-        if df.empty or len(df) < 2:
-            return None   # truly no data — hard block is correct
-        try:
-            _close  = float(df["c"].iloc[-1] or 0)
-            _open   = float(df["c"].iloc[0]  or 0)   # first bar of session
-            _prev   = float(state.get("prev_close", {}).get(symbol, _open) or _open)
-            _day_chg = ((_close - _prev) / _prev * 100.0) if _prev > 0 else 0.0
-            _hi     = float(df["h"].max() or _close)
-            _lo     = float(df["l"].min() or _close)
-            _rng    = ((_hi - _lo) / _close * 100.0) if _close > 0 else 0.0
-            _q      = state.get("quotes", {}).get(symbol, {})
-            _bid    = float(_q.get("bp", 0) or 0)
-            _ask    = float(_q.get("ap", 0) or 0)
-            _spread = ((_ask - _bid) / _close * 100.0) if _close > 0 and _ask > _bid else 0.0
-            detail = {
-                "score":               0.0,      # whitelist = no momentum score
-                "relative_volume":     0.0,      # unknown without scanner
-                "day_change_pct":      _day_chg,
-                "minute_momentum_pct": _day_chg,
-                "spread_pct":          _spread,
-                "minute_range_pct":    _rng,
-            }
-        except Exception:
-            return None
+        return None
     atr_pct = 0.0
     if not df.empty and len(df) >= ATR_PERIOD + 2:
         atr   = float(df["atr"].iloc[-1] or 0)
@@ -137,7 +110,8 @@ def ai_train_model():
         scale  = losses / max(wins, 1)   # handle class imbalance
 
         if XGBOOST_AVAILABLE:
-            model = XGBClassifier(
+            from sklearn.calibration import CalibratedClassifierCV
+            _xgb = XGBClassifier(
                 n_estimators     = 200,
                 max_depth        = 4,       # shallow trees — less overfit on small data
                 learning_rate    = 0.05,
@@ -149,6 +123,11 @@ def ai_train_model():
                 random_state     = 42,
                 verbosity        = 0,
             )
+            # V20.9g: Wrap with isotonic calibration so predict_proba returns
+            # real probabilities (not compressed 0.3% values).
+            # cv=3 uses 3-fold cross-val to fit the calibrator.
+            # Needs at least 30 samples per fold — safe with 241 samples.
+            model = CalibratedClassifierCV(_xgb, method="isotonic", cv=3)
             model.fit(X, y)
             state["ai_scaler"] = None   # XGBoost doesn't need scaling
         else:
