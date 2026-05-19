@@ -1,7 +1,7 @@
 """
 websockets_handler.py — Market data WebSocket and order update WebSocket.
 """
-MODULE_VERSION = "V20.9d"
+MODULE_VERSION = "V20.9i"
 import os, json, time, math, asyncio
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -65,9 +65,20 @@ async def _check_qty_available_after_fill(symbol: str, filled_qty: int):
         qty_available = int(float(data.get("qty_available", filled_qty) or filled_qty))
         if qty_available <= 0:
             log(f"[QTY_AVAIL] {symbol}: filled qty={filled_qty} but available=0 "
-                f"— shares unsettled, marking orphan (EOD/watchdog will close)")
+                f"— shares unsettled, marking orphan + cancelling broker stop")
             state.setdefault("orphan_positions", set()).add(symbol)
-            state.setdefault("unsettled_positions", set()).add(symbol)  # V20.9d: skip sell attempts until EOD
+            state.setdefault("unsettled_positions", set()).add(symbol)
+            # V20.9i: Cancel broker stop — will 403 anyway, EOD bulk-close handles it
+            _stop_oid = state.get("positions", {}).get(symbol, {}).get("stop_order_id")
+            if _stop_oid:
+                async def _cancel_stop(oid=_stop_oid, sym=symbol):
+                    try:
+                        await safe_api_call("DELETE", f"{TRADE_BASE_URL}/v2/orders/{oid}",
+                                           log_label=f"cancel_stop_{sym}", max_attempts=1)
+                        log(f"[QTY_AVAIL] {sym}: broker stop {oid[:8]} cancelled")
+                    except Exception:
+                        pass
+                asyncio.ensure_future(_cancel_stop())
         elif qty_available < filled_qty:
             log(f"[QTY_AVAIL] {symbol}: total={filled_qty} available={qty_available} "
                 f"— partial settlement, updating position qty")

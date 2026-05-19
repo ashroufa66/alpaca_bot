@@ -2,7 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.9h"
+MODULE_VERSION = "V20.9i"
 # V20.9c: Gap Day ATR floor 0.20%→0.10% (ARM-type consolidation was blocked)
 # V20.9b: Gap fallback uses state[prev_close] — IEX vol-confirm was always failing
 # V20.8: Gap Day Mode — 5 guards with slow-EMA dist + normalized VWAP slope
@@ -192,8 +192,13 @@ async def try_enter(symbol: str) -> bool:
     _bear_mode = (regime == "bear")
     if _bear_mode:
         # V18.9: Controlled aggression — allow entries in bear but use scalp params
-        # risk_scale already reduced to 0.40 in calc_kelly_qty
-        # Use _log_halt_once to avoid spamming all symbols every 10s
+        # V20.9h: Add AI check to bear mode — ai=0.00% entries were bypassing CHOP gate
+        # and getting stopped out immediately on IEX wide spreads.
+        if state.get("ai_trained"):
+            _bear_ai = ai_predict_probability(build_feature_vector(symbol, get_indicators(symbol)))
+            if _bear_ai >= 0 and _bear_ai < 0.05:
+                log(f"[BEAR BLOCK] {symbol} | AI={_bear_ai:.2%} < 5% — skipping bear scalp")
+                return False
         _log_halt_once(f"bear_scalp_{symbol}", f"[BEAR SCALP] {symbol} | bear regime — tight TP/SL")
 
     # V11.0: time-of-day quality filter
@@ -659,11 +664,6 @@ async def try_exit(symbol: str) -> bool:
     if _is_orphan:
         # mark orphan in state so broker 403 handler ignores it
         state.setdefault("orphan_positions", set()).add(symbol)
-        # V20.9g: If marked unsettled (qty_available=0), skip ALL sell attempts
-        # — every attempt returns 403. EOD bulk-close handles these.
-        if symbol in state.get("unsettled_positions", set()):
-            if not await should_force_exit_before_close():
-                return False   # wait for EOD bulk-close only
 
     # V17.8+: read pos under lock so we get a consistent snapshot
     async with state["lock"]:
