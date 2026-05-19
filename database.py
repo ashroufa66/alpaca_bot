@@ -2,7 +2,7 @@
 database.py — All Supabase persistence: trade history, AI samples,
                Kelly samples, open positions.
 """
-MODULE_VERSION = "V20.9i"
+MODULE_VERSION = "V20.9j"
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -213,21 +213,24 @@ def supa_restore_state():
         except Exception:
             pass
 
-    # V20.9i: Restore trades_today from trade_events so mid-session restart
-    # doesn't reset the daily trade counter to 0 and cause over-trading.
+    # V20.9j: Restore trades_today from trade_events — direct query.
+    # V20.9i was broken: supa_load_all() never loads trade_events, so
+    # data.get("trade_events", []) always returned [] and counter stayed 0.
+    # Fix: query trade_events directly filtered to today BUY_FILLED rows.
+    # trade_events stores "time" as ISO datetime string (from write_trade_log).
     try:
         import datetime as _dt
-        _today_ts_start = int(_dt.datetime.combine(
-            _dt.datetime.utcnow().date(),
-            _dt.time.min).timestamp())
-        _today_trades = sum(
-            1 for row in data.get("trade_events", [])
-            if row.get("action") == "BUY_FILLED"
-            and int(row.get("ts", 0)) >= _today_ts_start
+        _today_str = _dt.datetime.utcnow().date().isoformat()  # e.g. "2026-05-19"
+        _today_rows = _supa_request(
+            "GET", "trade_events",
+            params=f"?action=eq.BUY_FILLED&time=gte.{_today_str}&select=action"
         )
+        _today_trades = len(_today_rows) if isinstance(_today_rows, list) else 0
         if _today_trades > 0:
             state["trades_today"] = _today_trades
             log(f"[SUPABASE] Restored trades_today={_today_trades} from trade_events")
+        else:
+            log(f"[SUPABASE] trades_today=0 (no BUY_FILLED today or table empty)")
     except Exception as _e:
         log(f"[SUPABASE] trades_today restore failed: {_e}")
 
@@ -1112,5 +1115,3 @@ async def try_partial_exit(symbol: str) -> bool:
         write_trade_log("PARTIAL_SELL", symbol, sell_qty, bid, "PARTIAL_PROFIT_1.5R")
         return True
     return False
-
-
