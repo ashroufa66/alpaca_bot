@@ -2,7 +2,7 @@
 database.py — All Supabase persistence: trade history, AI samples,
                Kelly samples, open positions.
 """
-MODULE_VERSION = "V19.2"
+MODULE_VERSION = "V20.9i"
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -212,6 +212,24 @@ def supa_restore_state():
                 )
         except Exception:
             pass
+
+    # V20.9i: Restore trades_today from trade_events so mid-session restart
+    # doesn't reset the daily trade counter to 0 and cause over-trading.
+    try:
+        import datetime as _dt
+        _today_ts_start = int(_dt.datetime.combine(
+            _dt.datetime.utcnow().date(),
+            _dt.time.min).timestamp())
+        _today_trades = sum(
+            1 for row in data.get("trade_events", [])
+            if row.get("action") == "BUY_FILLED"
+            and int(row.get("ts", 0)) >= _today_ts_start
+        )
+        if _today_trades > 0:
+            state["trades_today"] = _today_trades
+            log(f"[SUPABASE] Restored trades_today={_today_trades} from trade_events")
+    except Exception as _e:
+        log(f"[SUPABASE] trades_today restore failed: {_e}")
 
     log(f"[SUPABASE] Restored: {len(state['ai_train_data'])} AI samples | "
         f"{len(state['kelly_outcomes'])} Kelly samples | "
