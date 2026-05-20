@@ -665,6 +665,11 @@ async def try_exit(symbol: str) -> bool:
     if _is_orphan:
         # mark orphan in state so broker 403 handler ignores it
         state.setdefault("orphan_positions", set()).add(symbol)
+        # V20.9h: if broker has this symbol in backoff, skip this exit attempt
+        # (the 403 would just be suppressed anyway, no point computing exit)
+        from broker import _orphan_403_backoff_until
+        if time.time() < _orphan_403_backoff_until.get(symbol, 0):
+            return False
 
     # V17.8+: read pos under lock so we get a consistent snapshot
     async with state["lock"]:
