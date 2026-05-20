@@ -1,7 +1,7 @@
 """
 models.py — XGBoost/RF momentum model, VWAP model, VWAP reversion entry.
 """
-MODULE_VERSION = "V20.9i"
+MODULE_VERSION = "V20.9k"
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -740,9 +740,24 @@ def risk_scale(regime: str = None) -> float:
     return regime_factor * pnl_factor
 
 def can_open_new_position() -> tuple:
-    """V18.9: returns (ok: bool, reason: str | None)"""
-    if state["trades_today"]       >= MAX_TRADES_PER_DAY:
-        return False, f"max trades/day ({state['trades_today']}/{MAX_TRADES_PER_DAY})"
+    """V20.9k: Dynamic daily trade cap based on realized P&L.
+    Normal day  → 25 trades
+    After -$30  → hard cap drops to 10 remaining (total 10, not 10 more)
+    After -$50  → hard cap drops to 5 remaining
+    Full DAILY_MAX_LOSS_USD (-$250) → stop entirely (existing guard)
+    This lets good days run fully while cutting bad days short.
+    """
+    # V20.9k: dynamic cap — tighten max trades as losses accumulate
+    pnl = state["realized_pnl_today"]
+    if pnl <= -50:
+        _effective_max = min(MAX_TRADES_PER_DAY, 5)
+    elif pnl <= -30:
+        _effective_max = min(MAX_TRADES_PER_DAY, 10)
+    else:
+        _effective_max = MAX_TRADES_PER_DAY
+
+    if state["trades_today"] >= _effective_max:
+        return False, f"max trades/day ({state['trades_today']}/{_effective_max})"
     if state["realized_pnl_today"] <= -DAILY_MAX_LOSS_USD:
         return False, f"daily loss limit (${state['realized_pnl_today']:.0f})"
     if time.time() < state["consec_loss_paused_until"]:

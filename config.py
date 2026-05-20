@@ -3,7 +3,7 @@ config.py — All configuration constants and environment variables.
 Single source of truth for every tunable parameter.
 Import pattern: from config import *
 """
-MODULE_VERSION = "V20.6"
+MODULE_VERSION = "V20.7"
 # V20.6 changes:
 #   1. CHOP filters heavily relaxed (score 8→4, momentum 0.60→0.40, volume not required)
 #   2. AI threshold lowered 0.60→0.52 (AI for sizing only, not blocking)
@@ -113,7 +113,7 @@ CHOP_SIZE_FACTOR       = 0.70   # V20.6: raised 0.50→0.70 (less punishment in 
 
 # ── Risk Management ────────────────────────────────────────
 MAX_OPEN_POSITIONS        = 7
-MAX_TRADES_PER_DAY        = 15
+MAX_TRADES_PER_DAY        = 25
 DAILY_MAX_LOSS_USD        = 250.0
 MAX_POSITION_USD          = 2000.0   # V20.1: raised $500→$2000 to match $10K account
 MIN_POSITION_USD          = 50.0
