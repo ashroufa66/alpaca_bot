@@ -1137,3 +1137,5 @@ async def try_partial_exit(symbol: str) -> bool:
         write_trade_log("PARTIAL_SELL", symbol, sell_qty, bid, "PARTIAL_PROFIT_1.5R")
         return True
     return False
+
+

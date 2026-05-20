@@ -1,7 +1,7 @@
 """
 indicators.py — Technical indicators, scanner logic, market regime.
 """
-MODULE_VERSION = "V19.1"
+MODULE_VERSION = "V19.2"
 import os, json, time, math, asyncio, random, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -454,21 +454,35 @@ def get_quote_frequency(symbol: str) -> int:
 # =========================================================
 
 def liquidity_filter_ok(symbol: str, position_usd: float) -> bool:
+    """
+    V20.9k: All rejection paths now log reason.
+    On IEX, bid_size is a single MM quote — unreliable. Use a much lower
+    effective depth threshold on IEX to avoid false rejections.
+    """
+    from broker import log
     q        = state["quotes"].get(symbol, {})
     bid      = float(q.get("bid",      0) or 0)
     bid_size = float(q.get("bid_size", 0) or 0)
     if bid <= 0 or bid_size <= 0:
+        log(f"[LIQ BLOCK] {symbol}: no bid/bid_size (bid={bid} size={bid_size})")
         return False
 
     depth_usd = bid * bid_size
-    if depth_usd < MIN_MARKET_DEPTH_USD:
+
+    # V20.9k: IEX bid_size is synthetic — apply a much looser depth floor
+    _min_depth = MIN_MARKET_DEPTH_USD * 0.10 if DATA_FEED == "iex" else MIN_MARKET_DEPTH_USD
+    if depth_usd < _min_depth:
+        log(f"[LIQ BLOCK] {symbol}: depth=${depth_usd:.0f} < min=${_min_depth:.0f} (bid_size={bid_size:.0f})")
         return False
 
-    if depth_usd / max(position_usd, 1.0) < MIN_LIQUIDITY_RATIO:
+    _min_ratio = MIN_LIQUIDITY_RATIO * 0.10 if DATA_FEED == "iex" else MIN_LIQUIDITY_RATIO
+    if depth_usd / max(position_usd, 1.0) < _min_ratio:
+        log(f"[LIQ BLOCK] {symbol}: depth/pos ratio={depth_usd/max(position_usd,1):.2f} < {_min_ratio:.2f}")
         return False
 
     # FIX: use the corrected per-minute counter
     if get_quote_frequency(symbol) < MIN_QUOTE_FREQUENCY:
+        log(f"[LIQ BLOCK] {symbol}: quote_freq={get_quote_frequency(symbol):.1f} < {MIN_QUOTE_FREQUENCY}")
         return False
 
     return True
