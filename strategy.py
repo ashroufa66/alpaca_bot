@@ -2,7 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.9i"
+MODULE_VERSION = "V20.9k"
 # V20.9c: Gap Day ATR floor 0.20%→0.10% (ARM-type consolidation was blocked)
 # V20.9b: Gap fallback uses state[prev_close] — IEX vol-confirm was always failing
 # V20.8: Gap Day Mode — 5 guards with slow-EMA dist + normalized VWAP slope
@@ -581,6 +581,7 @@ async def try_enter(symbol: str) -> bool:
 
     position_usd = ask * qty
     if not liquidity_filter_ok(symbol, position_usd):
+        # V20.9k: reason already logged inside liquidity_filter_ok
         return False
     if position_usd < 15.0:
         log(f"[ENTRY_SKIP] {symbol}: position too small ${position_usd:.0f} (qty={qty} @ ${ask:.2f})")
