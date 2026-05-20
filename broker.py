@@ -1,7 +1,7 @@
 """
 broker.py — Alpaca REST API helpers, sector map, utility functions.
 """
-MODULE_VERSION = "V20.9g"
+MODULE_VERSION = "V20.9h"
 # V20.5: Restore uses qty_available (settled shares) not qty (total) — fixes 403 sell loops
 # V20.0: REST fallback price fetch for IEX bar droughts
 # V18.6 fixes (last 5%):
@@ -10,9 +10,17 @@ MODULE_VERSION = "V20.9g"
 #   3. market_is_open — always calls get_clock() for holidays/half-days; never local-only
 #   4. Latency-aware execution — orders blocked when latency >= LATENCY_FREEZE_MS
 #   5. Emergency position kill — Alpaca bulk-close when circuit opens with open positions
-print(f"[BROKER] V20.5 loaded — EOD sync block | market-hours guard | skip short | circuit breaker | short EOD close | hard sell guard | qty_available restore")
+print(f"[BROKER] V20.9h loaded — orphan 403 backoff (3 strikes → 5 min quiet) | EOD sync block | market-hours guard | skip short | circuit breaker | short EOD close | hard sell guard | qty_available restore")
 # V19.9: EOD sync block flag — set by force_close_all_eod(), cleared at midnight
 _eod_close_done = False
+
+# V20.9h: Orphan 403 backoff — after 3 consecutive 403s on the same symbol,
+# suppress retries for 5 minutes. Prevents ~2 API calls/min of wasted noise
+# on unsettled paper-trading positions (qty_available=0 won't change intraday).
+_orphan_403_counts: dict = {}   # symbol -> consecutive 403 count
+_orphan_403_backoff_until: dict = {}  # symbol -> backoff-until timestamp
+ORPHAN_403_MAX_BEFORE_BACKOFF = 3
+ORPHAN_403_BACKOFF_SECS = 300  # 5 minutes
 #print(f"[BROKER] REPLACED — global clock cache 60s | circuit breaker | latency gate | emergency kill | stale blacklist fix")
 import os, json, time, math, asyncio, csv
 from collections import deque
@@ -600,7 +608,17 @@ async def async_submit_limit_order(symbol: str, qty: int, side: str,
             # V19.3: skip stale detection for orphan positions — they ARE real,
             # just missing Supabase records. Let try_exit manage them via TP/SL/EOD.
             if symbol in state.get("orphan_positions", set()):
-                log(f"[ORPHAN] {symbol}: 403 on sell — position is real, skipping stale removal")
+                # V20.9h: backoff after 3 consecutive 403s — 5 min quiet period
+                _orphan_403_counts[symbol] = _orphan_403_counts.get(symbol, 0) + 1
+                _count = _orphan_403_counts[symbol]
+                if _count >= ORPHAN_403_MAX_BEFORE_BACKOFF:
+                    _orphan_403_backoff_until[symbol] = time.time() + ORPHAN_403_BACKOFF_SECS
+                    _orphan_403_counts[symbol] = 0
+                    log(f"[ORPHAN] {symbol}: 403 on sell — position is real, skipping stale removal"
+                        f" | {_count} consecutive 403s — backing off 5 min")
+                else:
+                    log(f"[ORPHAN] {symbol}: 403 on sell — position is real, skipping stale removal"
+                        f" ({_count}/{ORPHAN_403_MAX_BEFORE_BACKOFF})")
                 return None
             log(f"[STALE POS] {symbol}: Alpaca has no position — removing from state + Supabase")
             _pos = state["positions"].get(symbol, {})
@@ -656,7 +674,17 @@ async def async_submit_market_order(symbol: str, qty: int, side: str) -> Optiona
         if resp.status == 403 and side == "sell" and "available" in str(reason):
             # V19.3: skip stale detection for orphan positions
             if symbol in state.get("orphan_positions", set()):
-                log(f"[ORPHAN] {symbol}: 403 on sell — position is real, skipping stale removal")
+                # V20.9h: backoff after 3 consecutive 403s — 5 min quiet period
+                _orphan_403_counts[symbol] = _orphan_403_counts.get(symbol, 0) + 1
+                _count = _orphan_403_counts[symbol]
+                if _count >= ORPHAN_403_MAX_BEFORE_BACKOFF:
+                    _orphan_403_backoff_until[symbol] = time.time() + ORPHAN_403_BACKOFF_SECS
+                    _orphan_403_counts[symbol] = 0
+                    log(f"[ORPHAN] {symbol}: 403 on sell — position is real, skipping stale removal"
+                        f" | {_count} consecutive 403s — backing off 5 min")
+                else:
+                    log(f"[ORPHAN] {symbol}: 403 on sell — position is real, skipping stale removal"
+                        f" ({_count}/{ORPHAN_403_MAX_BEFORE_BACKOFF})")
                 return None
             log(f"[STALE POS] {symbol}: Alpaca has no position — removing from state + Supabase")
             _pos = state["positions"].get(symbol, {})
