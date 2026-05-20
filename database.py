@@ -2,7 +2,7 @@
 database.py — All Supabase persistence: trade history, AI samples,
                Kelly samples, open positions.
 """
-MODULE_VERSION = "V20.9j"
+MODULE_VERSION = "V20.9k"
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -233,6 +233,28 @@ def supa_restore_state():
             log(f"[SUPABASE] trades_today=0 (no BUY_FILLED today or table empty)")
     except Exception as _e:
         log(f"[SUPABASE] trades_today restore failed: {_e}")
+
+    # V20.9k: Restore realized_pnl_today from trade_history.
+    # Manual closes leave no WS fill event, so realized_pnl_today stays
+    # wrong after a mid-session restart. Fix: sum today's closed trade pnl
+    # from trade_history. Uses "timestamp" (Unix int) for today filter.
+    try:
+        import datetime as _dt
+        _today_ts = int(_dt.datetime.combine(
+            _dt.datetime.utcnow().date(), _dt.time.min).timestamp())
+        _pnl_rows = _supa_request(
+            "GET", "trade_history",
+            params=f"?timestamp=gte.{_today_ts}&select=pnl"
+        )
+        if isinstance(_pnl_rows, list) and _pnl_rows:
+            _pnl_today = sum(float(r.get("pnl", 0)) for r in _pnl_rows)
+            state["realized_pnl_today"] = _pnl_today
+            log(f"[SUPABASE] Restored realized_pnl_today=${_pnl_today:.2f} "
+                f"from {len(_pnl_rows)} trade_history rows")
+        else:
+            log(f"[SUPABASE] realized_pnl_today=0 (no closed trades today)")
+    except Exception as _e:
+        log(f"[SUPABASE] realized_pnl_today restore failed: {_e}")
 
     log(f"[SUPABASE] Restored: {len(state['ai_train_data'])} AI samples | "
         f"{len(state['kelly_outcomes'])} Kelly samples | "
