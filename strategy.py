@@ -2,7 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.9l"
+MODULE_VERSION = "V20.9m"
 # V20.9c: Gap Day ATR floor 0.20%→0.10% (ARM-type consolidation was blocked)
 # V20.9b: Gap fallback uses state[prev_close] — IEX vol-confirm was always failing
 # V20.8: Gap Day Mode — 5 guards with slow-EMA dist + normalized VWAP slope
@@ -665,6 +665,13 @@ async def try_exit(symbol: str) -> bool:
     if _is_orphan:
         # mark orphan in state so broker 403 handler ignores it
         state.setdefault("orphan_positions", set()).add(symbol)
+
+    # V20.9m: universal 403 backoff guard — skip exit attempt for ANY symbol
+    # in backoff, not just ones already in orphan_positions. New positions also
+    # get qty_available=0 on paper trading until T+1 settlement.
+    from broker import _orphan_403_backoff_until
+    if time.time() < _orphan_403_backoff_until.get(symbol, 0):
+        return False
 
     # V17.8+: read pos under lock so we get a consistent snapshot
     async with state["lock"]:
