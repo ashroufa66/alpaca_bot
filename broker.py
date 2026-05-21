@@ -1,7 +1,7 @@
 """
 broker.py — Alpaca REST API helpers, sector map, utility functions.
 """
-MODULE_VERSION = "V20.9h"
+MODULE_VERSION = "V20.9m"
 # V20.5: Restore uses qty_available (settled shares) not qty (total) — fixes 403 sell loops
 # V20.0: REST fallback price fetch for IEX bar droughts
 # V18.6 fixes (last 5%):
@@ -10,7 +10,7 @@ MODULE_VERSION = "V20.9h"
 #   3. market_is_open — always calls get_clock() for holidays/half-days; never local-only
 #   4. Latency-aware execution — orders blocked when latency >= LATENCY_FREEZE_MS
 #   5. Emergency position kill — Alpaca bulk-close when circuit opens with open positions
-print(f"[BROKER] V20.9h loaded — orphan 403 backoff (3 strikes → 5 min quiet) | EOD sync block | market-hours guard | skip short | circuit breaker | short EOD close | hard sell guard | qty_available restore")
+print(f"[BROKER] V20.9m loaded — orphan 403 backoff (3 strikes → 5 min quiet) | EOD sync block | market-hours guard | skip short | circuit breaker | short EOD close | hard sell guard | qty_available restore")
 # V19.9: EOD sync block flag — set by force_close_all_eod(), cleared at midnight
 _eod_close_done = False
 
@@ -613,7 +613,7 @@ async def async_submit_limit_order(symbol: str, qty: int, side: str,
                 _count = _orphan_403_counts[symbol]
                 if _count >= ORPHAN_403_MAX_BEFORE_BACKOFF:
                     _orphan_403_backoff_until[symbol] = time.time() + ORPHAN_403_BACKOFF_SECS
-                    _orphan_403_counts[symbol] = 0
+                    _orphan_403_counts[symbol] = ORPHAN_403_MAX_BEFORE_BACKOFF  # V20.9m: sticky — dont reset
                     log(f"[ORPHAN] {symbol}: 403 on sell — position is real, skipping stale removal"
                         f" | {_count} consecutive 403s — backing off 5 min")
                 else:
@@ -679,7 +679,7 @@ async def async_submit_market_order(symbol: str, qty: int, side: str) -> Optiona
                 _count = _orphan_403_counts[symbol]
                 if _count >= ORPHAN_403_MAX_BEFORE_BACKOFF:
                     _orphan_403_backoff_until[symbol] = time.time() + ORPHAN_403_BACKOFF_SECS
-                    _orphan_403_counts[symbol] = 0
+                    _orphan_403_counts[symbol] = ORPHAN_403_MAX_BEFORE_BACKOFF  # V20.9m: sticky — dont reset
                     log(f"[ORPHAN] {symbol}: 403 on sell — position is real, skipping stale removal"
                         f" | {_count} consecutive 403s — backing off 5 min")
                 else:
