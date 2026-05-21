@@ -2,7 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.9k"
+MODULE_VERSION = "V20.9l"
 # V20.9c: Gap Day ATR floor 0.20%→0.10% (ARM-type consolidation was blocked)
 # V20.9b: Gap fallback uses state[prev_close] — IEX vol-confirm was always failing
 # V20.8: Gap Day Mode — 5 guards with slow-EMA dist + normalized VWAP slope
@@ -130,9 +130,9 @@ async def try_enter(symbol: str) -> bool:
             state.setdefault("iex_no_data", set()).add(symbol)
             return False
     # Skip symbols confirmed to have no IEX data this session
+    # V20.9i: cleared in websockets_handler when quote arrives — not permanent
     if symbol in state.get("iex_no_data", set()):
-        return False
-        _log_halt_once(symbol + "_noquote", f"[ENTRY_SKIP] {symbol}: no quote data yet (WS reconnecting?)")
+        _log_halt_once(symbol + "_noquote", f"[ENTRY_SKIP] {symbol}: no IEX data — blacklisted (will clear on quote)")
         return False
     # V17.8+: per-symbol 15s warmup after first quote — prevents stale fills
     if time.time() - state.get("quote_first_seen", {}).get(symbol, 0) < 15:
@@ -665,11 +665,6 @@ async def try_exit(symbol: str) -> bool:
     if _is_orphan:
         # mark orphan in state so broker 403 handler ignores it
         state.setdefault("orphan_positions", set()).add(symbol)
-        # V20.9h: if broker has this symbol in backoff, skip this exit attempt
-        # (the 403 would just be suppressed anyway, no point computing exit)
-        from broker import _orphan_403_backoff_until
-        if time.time() < _orphan_403_backoff_until.get(symbol, 0):
-            return False
 
     # V17.8+: read pos under lock so we get a consistent snapshot
     async with state["lock"]:

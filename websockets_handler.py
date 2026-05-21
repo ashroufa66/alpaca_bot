@@ -1,7 +1,7 @@
 """
 websockets_handler.py — Market data WebSocket and order update WebSocket.
 """
-MODULE_VERSION = "V20.9i"
+MODULE_VERSION = "V20.9j"
 import os, json, time, math, asyncio
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -226,6 +226,8 @@ async def market_data_ws():
 
                             if symbol not in state["quotes"]:
                                 state.setdefault("quote_first_seen", {})[symbol] = time.time()
+                                # V20.9i: quote arrived — remove from no-data blacklist
+                                state.get("iex_no_data", set()).discard(symbol)
                             state["quotes"][symbol] = {
                                 "bid": bid, "ask": ask, "spread_pct": sp,
                                 "bid_size": bid_size, "ask_size": ask_size,
@@ -264,6 +266,8 @@ async def market_data_ws():
                             if _c > 0:
                                 if symbol not in state["quotes"]:
                                     state.setdefault("quote_first_seen", {})[symbol] = time.time()
+                                    # V20.9i: bar arrived — remove from no-data blacklist
+                                    state.get("iex_no_data", set()).discard(symbol)
                                 state["quotes"][symbol] = {
                                     "bid": round(_c * 0.9995, 4),
                                     "ask": round(_c * 1.0005, 4),
