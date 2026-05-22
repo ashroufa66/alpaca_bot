@@ -1,7 +1,7 @@
 """
 loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V20.9b"
+MODULE_VERSION = "V20.9c"
 # V19.5 fixes:
 #   1. position_reconciliation_loop — every 5 min, compares state["positions"]
 #      against Alpaca's actual positions. Auto-removes ghosts (qty=0 in Alpaca).
@@ -290,6 +290,7 @@ async def position_reconciliation_loop():
             _et = now_et()
             if _et.hour == 0 and _et.minute < 5:
                 _did_close_cleanup = False
+                state["_orphan_cap_last_log"] = 0  # V20.9c: reset orphan cap log timer
 
             if _is_open:
                 _did_close_cleanup = False  # reset if market reopens (new day)
@@ -470,6 +471,29 @@ async def entry_loop():
                         await asyncio.sleep(5)
                         continue
                 entries_done = 0
+
+                # V20.9c: Orphan cap — if too many positions are in 403 backoff,
+                # stop entering new trades for the rest of the day.
+                # Every new position on paper trading becomes unsellable (qty_available=0)
+                # until T+1 settlement. Once N slots are orphaned, adding more just
+                # fills the remaining slots with equally unsellable positions.
+                from broker import _orphan_403_backoff_until
+                _now = time.time()
+                _orphan_count = sum(
+                    1 for s in state.get("positions", {})
+                    if _now < _orphan_403_backoff_until.get(s, 0)
+                )
+                _ORPHAN_CAP = 2  # halt new entries once 2+ positions are in backoff
+                if _orphan_count >= _ORPHAN_CAP:
+                    # throttle log to once per 5 min to avoid spam
+                    _last_orphan_log = state.get("_orphan_cap_last_log", 0)
+                    if _now - _last_orphan_log > 300:
+                        log(f"[ORPHAN CAP] {_orphan_count} positions in 403 backoff "
+                            f"— halting new entries (paper settlement). "
+                            f"EOD force-close at 12:45 PT will handle.")
+                        state["_orphan_cap_last_log"] = _now
+                    await asyncio.sleep(10)
+                    continue
                 for symbol in list(state["scanner_candidates"]):
                     if entries_done >= MAX_NEW_ENTRIES_PER_CYCLE:
                         break
