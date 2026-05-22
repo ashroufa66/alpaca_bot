@@ -291,6 +291,7 @@ async def position_reconciliation_loop():
             if _et.hour == 0 and _et.minute < 5:
                 _did_close_cleanup = False
                 state["_orphan_cap_last_log"] = 0  # V20.9c: reset orphan cap log timer
+                state["_eod_wall_fired"] = False    # V20.9c: reset EOD wall-clock flag
 
             if _is_open:
                 _did_close_cleanup = False  # reset if market reopens (new day)
@@ -604,6 +605,19 @@ async def housekeeping_loop():
                         log(f"[EOD] {FORCE_EXIT_BEFORE_CLOSE_MINUTES}min to close "
                             f"— force-closing all positions")
                         await force_close_all_eod()
+
+            # V20.9c: EOD wall-clock fallback — fires even if Alpaca already
+            # marked market closed before housekeeping ran its close check.
+            # Race condition: market_is_open() → False just before the 15-min
+            # window, causing the EOD block above to be skipped entirely.
+            # Fix: check ET wall-clock directly outside market_is_open() guard.
+            _et_now = now_et()
+            _eod_wall = (_et_now.hour == 12 and _et_now.minute >= 44) or _et_now.hour == 13
+            if _eod_wall and state.get("positions") and not state.get("_eod_wall_fired"):
+                log(f"[EOD WALL] Wall-clock EOD fallback triggered "
+                    f"({_et_now.strftime('%H:%M')} ET) — force-closing {len(state['positions'])} position(s)")
+                state["_eod_wall_fired"] = True
+                await force_close_all_eod()
 
                 # Memory prune
                 _active = set(state["scanner_candidates"]) | set(state["positions"])
