@@ -2,7 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.9m"
+MODULE_VERSION = "V20.9n"
 # V20.9c: Gap Day ATR floor 0.20%→0.10% (ARM-type consolidation was blocked)
 # V20.9b: Gap fallback uses state[prev_close] — IEX vol-confirm was always failing
 # V20.8: Gap Day Mode — 5 guards with slow-EMA dist + normalized VWAP slope
@@ -669,9 +669,12 @@ async def try_exit(symbol: str) -> bool:
     # V20.9m: universal 403 backoff guard — skip exit attempt for ANY symbol
     # in backoff, not just ones already in orphan_positions. New positions also
     # get qty_available=0 on paper trading until T+1 settlement.
+    # V20.9n FIX: only skip if there's no urgent exit reason — always allow
+    # STOP_LOSS, TAKE_PROFIT, EOD, FLASH_CRASH through regardless of backoff.
+    # Backoff was blocking stop losses and letting winners turn into losers.
     from broker import _orphan_403_backoff_until
-    if time.time() < _orphan_403_backoff_until.get(symbol, 0):
-        return False
+    _in_backoff = time.time() < _orphan_403_backoff_until.get(symbol, 0)
+    # We'll check exit reason below and override backoff for emergencies
 
     # V17.8+: read pos under lock so we get a consistent snapshot
     async with state["lock"]:
@@ -725,6 +728,13 @@ async def try_exit(symbol: str) -> bool:
         reason = "EMA_REVERSAL"
 
     if reason:
+        # V20.9n: backoff guard — block non-emergency exits when in 403 backoff.
+        # Emergency exits (SL, TP, EOD, crash) ALWAYS bypass backoff.
+        # Only trailing stop and EMA reversal are suppressed during backoff.
+        _emergency_reasons = {"STOP_LOSS", "TAKE_PROFIT", "SCALP_SL", "SCALP_TP",
+                               "EOD_EXIT", "FLASH_CRASH_EXIT", "FORCE_EXIT_CRASH"}
+        if _in_backoff and reason not in _emergency_reasons:
+            return False  # suppress trailing/EMA exits during backoff only
         qty = int(pos["qty"])
 
         # V20.2: Hard Alpaca position check — runs for ALL sells including orphans.
