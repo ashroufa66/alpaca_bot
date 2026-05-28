@@ -1,7 +1,7 @@
 """
 loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V20.9d"
+MODULE_VERSION = "V20.9e"
 # V19.5 fixes:
 #   1. position_reconciliation_loop — every 5 min, compares state["positions"]
 #      against Alpaca's actual positions. Auto-removes ghosts (qty=0 in Alpaca).
@@ -585,11 +585,13 @@ async def housekeeping_loop():
                             f"— force-closing all positions")
                         await force_close_all_eod()
 
-            # V20.9c: EOD wall-clock fallback — fires even if Alpaca already
-            # marked market closed before housekeeping ran its close check.
-            # Race condition: market_is_open() → False just before the 15-min
-            # window, causing the EOD block above to be skipped entirely.
-            # Fix: check ET wall-clock directly outside market_is_open() guard.
+            else:
+                log("Market closed — waiting for open...")
+
+            # V20.9d: EOD wall-clock fallback — MUST be outside market_is_open()
+            # block. Market closes at 1:00 PM PT; Alpaca marks is_open=False
+            # slightly before 12:44 PT, causing the inner EOD check to be skipped.
+            # This runs unconditionally every housekeeping cycle.
             _et_now = now_et()
             _eod_wall = (_et_now.hour == 12 and _et_now.minute >= 44) or _et_now.hour == 13
             if _eod_wall and state.get("positions") and not state.get("_eod_wall_fired"):
@@ -597,59 +599,6 @@ async def housekeeping_loop():
                     f"({_et_now.strftime('%H:%M')} ET) — force-closing {len(state['positions'])} position(s)")
                 state["_eod_wall_fired"] = True
                 await force_close_all_eod()
-
-                # Memory prune
-                _active = set(state["scanner_candidates"]) | set(state["positions"])
-                _prunable = [
-                    "quotes","spread_history","obad_bid_history",
-                    "obad_ask_history","lip_imbalance_history",
-                    "lsd_bid_history","vpin_bucket_imbalances",
-                    "obiv_imbalance_hist","dark_pool_trades",
-                    "dark_pool_signal","gap_data","mmf_ticks",
-                    "quote_counts","last_halt_log","lsd_shocked",
-                    "sweep_signals",
-                ]
-                for _key in _prunable:
-                    _d = state.get(_key)
-                    if isinstance(_d, dict):
-                        for s in [k for k in list(_d) if k not in _active]:
-                            _d.pop(s, None)
-
-                kelly       = calc_kelly_fraction()
-                ai_status   = ("OK" if state["ai_trained"]
-                               else f"{len(state['ai_train_data'])}/{AI_MIN_TRAINING_SAMPLES}")
-                vwap_status = ("OK" if state["vwap_trained"]
-                               else f"{len(state['vwap_train_data'])}/{VWAP_MODEL_MIN_SAMPLES}")
-
-                _et = state.get("equity_trail", {})
-                trail_str = ""
-                if _et.get("active"):
-                    trail_str = f" | Trail=${_et.get('trail_stop', 0):.0f}"
-                elif _et.get("triggered"):
-                    trail_str = " | Trail=FIRED"
-
-                log(f"[STATUS] {regime.upper()} | "
-                    f"Pos={len(state['positions'])} "
-                    f"Pend={len(state['pending_symbols'])} | "
-                    f"Trades={state['trades_today']} "
-                    f"PnL={state['realized_pnl_today']:.2f}${trail_str} | "
-                    f"Kelly={kelly:.3f}(W{state['kelly_wins']}/L{state['kelly_losses']}) | "
-                    f"AI={ai_status} | VWAP={vwap_status}")
-                log(f"[RISK]   "
-                    f"VIX={state['vix_proxy_regime'].upper()}"
-                    f"({state['vix_proxy_value']:.2f}x) | "
-                    f"SPY={state['spy_volatility_regime'].upper()} | "
-                    f"Flash={'🚨' if state['flash_crash_active'] else 'OK'} | "
-                    f"Feed={DATA_FEED.upper()} | "
-                    f"CB={_cb.get('state','CLOSED')}"
-                    f"({_cb.get('failures',0)}/"
-                    f"{_cb.get('threshold', CB_OPEN_THRESHOLD_NORMAL)}) | "
-                    f"BP=${state['account_buying_power']:.0f}")
-
-                await check_trade_frequency()
-
-            else:
-                log("Market closed — waiting for open...")
         except Exception as e:
             log(f"Housekeeping loop error: {e}")
         _open = state["clock_cache_is_open"]
