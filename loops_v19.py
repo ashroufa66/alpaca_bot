@@ -1,7 +1,7 @@
 """
 loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V20.9c"
+MODULE_VERSION = "V20.9d"
 # V19.5 fixes:
 #   1. position_reconciliation_loop — every 5 min, compares state["positions"]
 #      against Alpaca's actual positions. Auto-removes ghosts (qty=0 in Alpaca).
@@ -338,8 +338,9 @@ async def position_reconciliation_loop():
 
 async def force_close_all_eod():
     """
-    V19.5: EOD force-close that works for normal AND orphan positions.
-    Uses Alpaca bulk-close as guaranteed fallback.
+    V20.9n: EOD force-close — bulk DELETE first (guaranteed), then cleanup.
+    Previous: individual market sells first → 403 on orphans → bulk as fallback.
+    Now: bulk DELETE unconditionally first, then clear state.
     """
     positions = list(state["positions"].keys())
 
@@ -353,27 +354,7 @@ async def force_close_all_eod():
         log(f"[EOD] Force-closing {len(positions)} position(s): "
             f"{', '.join(positions)}")
 
-    # V20.1: Close any short positions first (orphan shorts not in bot state)
-    # (already called above if positions was empty — skip if already done)
-
-    # Step 1: individual market sells (long positions in bot state)
-    for symbol in positions:
-        pos = state["positions"].get(symbol, {})
-        qty = int(pos.get("qty", 0))
-        if qty <= 0:
-            await del_position(symbol)
-            continue
-        try:
-            result = await async_submit_market_order(symbol, qty, "sell")
-            if result:
-                log(f"[EOD] ✅ Sell submitted {symbol} qty={qty}")
-            else:
-                log(f"[EOD] ⚠️ {symbol} sell returned None — "
-                    f"bulk-close will handle it")
-        except Exception as e:
-            log(f"[EOD] Error selling {symbol}: {e}")
-
-    # Step 2: Alpaca bulk-close (guaranteed fallback — closes everything)
+    # Step 1: Alpaca bulk-close FIRST — unconditional, handles orphans and settled
     try:
         session = state.get("http_session")
         if session:
@@ -390,9 +371,7 @@ async def force_close_all_eod():
     except Exception as e:
         log(f"[EOD] Bulk-close error: {e}")
 
-    # V19.6: Wait for Alpaca fills to settle before clearing state.
-    # Without this, sync_positions() immediately restores positions
-    # from Alpaca before fills complete — causing infinite EOD retry loop.
+    # Step 2: Wait for Alpaca fills to settle before clearing state
     log("[EOD] Waiting 8s for Alpaca fills to settle...")
     await asyncio.sleep(8)
 
