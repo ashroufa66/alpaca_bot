@@ -698,6 +698,24 @@ async def try_exit(symbol: str) -> bool:
     stop_price = pos.get("stop_price") or (entry - atr_at_entry * ATR_STOP_MULT_BASE)
     tp_price   = pos.get("tp_price")   or (entry + (entry - stop_price) * TAKE_PROFIT_R_MULT)
 
+    # V20.9n: Hard percentage stop — overrides ATR stop if ATR is too loose
+    # Prevents IEX compressed ATR from giving back 1-2% before stopping out
+    _hard_stop = entry * (1 - HARD_STOP_PCT)
+    stop_price = max(stop_price, _hard_stop)  # tighter of the two
+
+    # V20.9n: Profit lock — once trade hits +0.6%, floor the stop at +0.2%
+    # Prevents winner → loser reversals on large-caps that retrace violently
+    _profit_lock_floor = entry * (1 + PROFIT_LOCK_FLOOR_PCT)
+    _profit_lock_trigger = entry * (1 + PROFIT_LOCK_TRIGGER_PCT)
+    if highest >= _profit_lock_trigger:
+        stop_price = max(stop_price, _profit_lock_floor)
+        # update stored stop_price so it persists across watchdog cycles
+        async with state["lock"]:
+            if symbol in state["positions"]:
+                _stored = state["positions"][symbol].get("stop_price", 0)
+                if _profit_lock_floor > _stored:
+                    state["positions"][symbol]["stop_price"] = _profit_lock_floor
+
     df             = get_indicators(symbol)
     trailing_mult  = get_adaptive_trailing_mult(df)
     trailing_price = highest - atr_at_entry * trailing_mult
@@ -721,7 +739,11 @@ async def try_exit(symbol: str) -> bool:
     elif mid >= tp_price:
         reason = "TAKE_PROFIT"
     elif mid <= stop_price:
-        reason = "STOP_LOSS"
+        # distinguish profit-lock exits from normal stop losses in logs
+        if highest >= _profit_lock_trigger and stop_price >= _profit_lock_floor:
+            reason = "PROFIT_LOCK"
+        else:
+            reason = "STOP_LOSS"
     elif highest > entry and mid <= trailing_price:
         reason = "TRAILING_STOP"
     elif not df.empty and len(df) >= EMA_SLOW + 2 and bearish_cross(df):
@@ -732,7 +754,8 @@ async def try_exit(symbol: str) -> bool:
         # Emergency exits (SL, TP, EOD, crash) ALWAYS bypass backoff.
         # Only trailing stop and EMA reversal are suppressed during backoff.
         _emergency_reasons = {"STOP_LOSS", "TAKE_PROFIT", "SCALP_SL", "SCALP_TP",
-                               "EOD_EXIT", "FLASH_CRASH_EXIT", "FORCE_EXIT_CRASH"}
+                               "EOD_EXIT", "FLASH_CRASH_EXIT", "FORCE_EXIT_CRASH",
+                               "PROFIT_LOCK"}
         if _in_backoff and reason not in _emergency_reasons:
             return False  # suppress trailing/EMA exits during backoff only
         qty = int(pos["qty"])
@@ -751,20 +774,11 @@ async def try_exit(symbol: str) -> bool:
             return False
         qty = min(qty, alpaca_qty)   # never sell more than Alpaca says we own
 
-        # FIX V11.2: smart sell — use market order when spread is tight
-        # or when exiting due to emergency (flash crash, EOD, stop loss)
-        emergency_reasons = {"FLASH_CRASH_EXIT", "EOD_EXIT", "STOP_LOSS", "SCALP_SL"}
-        use_market = (
-            reason in emergency_reasons
-            or (q["spread_pct"] < 0.3)          # tight spread — safe to market sell
-            or (_is_scalp and reason == "SCALP_TP" and q["spread_pct"] < 0.2)  # fast TP fill
-        )
-        if use_market:
-            order = await async_submit_market_order(symbol, qty, "sell")
-            order_type_log = "MARKET"
-        else:
-            order = await async_submit_limit_order(symbol, qty, "sell", bid)  # FIX V12.6
-            order_type_log = "LIMIT"
+        # V20.9n: Always use market orders for exits — limit orders can hang
+        # when bid disappears in fast moves, leaving position open.
+        # Speed and certainty > slippage on exits.
+        order = await async_submit_market_order(symbol, qty, "sell")
+        order_type_log = "MARKET"
 
         if order:
             oid = order["id"]

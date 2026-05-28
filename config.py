@@ -3,7 +3,7 @@ config.py — All configuration constants and environment variables.
 Single source of truth for every tunable parameter.
 Import pattern: from config import *
 """
-MODULE_VERSION = "V20.8"
+MODULE_VERSION = "V20.9"
 # V20.6 changes:
 #   1. CHOP filters heavily relaxed (score 8→4, momentum 0.60→0.40, volume not required)
 #   2. AI threshold lowered 0.60→0.52 (AI for sizing only, not blocking)
@@ -133,6 +133,14 @@ ATR_STOP_MULT_BULL     = 1.5
 ATR_STOP_MULT_CHOP     = 1.5
 ATR_STOP_MULT_BASE     = 1.5
 TRAILING_STOP_ATR_MULT = 1.0
+
+# V20.9n: Hard percentage stop — prevents runaway losses when IEX ATR is compressed
+# final_stop = max(atr_stop, pct_stop) — whichever is tighter (closer to entry)
+HARD_STOP_PCT           = 0.008  # 0.8% max loss from entry regardless of ATR
+
+# V20.9n: Profit lock — once trade reaches +0.6%, stop moves to +0.2% (locks min profit)
+PROFIT_LOCK_TRIGGER_PCT = 0.006  # gain % that triggers profit lock
+PROFIT_LOCK_FLOOR_PCT   = 0.002  # floor stop once locked in
 
 # ── Execution ──────────────────────────────────────────────
 TAKE_PROFIT_R_MULT    = 2.0   # V20.8: reduced 3.0→2.0 — more realistic for large-cap intraday
