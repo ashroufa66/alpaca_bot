@@ -1,7 +1,7 @@
 """
 loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V20.9g"
+MODULE_VERSION = "V20.9h"
 # V19.5 fixes:
 #   1. position_reconciliation_loop — every 5 min, compares state["positions"]
 #      against Alpaca's actual positions. Auto-removes ghosts (qty=0 in Alpaca).
@@ -338,9 +338,8 @@ async def position_reconciliation_loop():
 
 async def force_close_all_eod():
     """
-    V20.9n: EOD force-close — bulk DELETE first (guaranteed), then cleanup.
-    Previous: individual market sells first → 403 on orphans → bulk as fallback.
-    Now: bulk DELETE unconditionally first, then clear state.
+    V20.9h: EOD force-close — bulk DELETE first, then per-symbol fallback
+    for any positions still open (unsettled paper positions survive bulk DELETE).
     """
     positions = list(state["positions"].keys())
 
@@ -354,9 +353,10 @@ async def force_close_all_eod():
         log(f"[EOD] Force-closing {len(positions)} position(s): "
             f"{', '.join(positions)}")
 
-    # Step 1: Alpaca bulk-close FIRST — unconditional, handles orphans and settled
+    session = state.get("http_session")
+
+    # Step 1: Alpaca bulk-close — closes settled positions
     try:
-        session = state.get("http_session")
         if session:
             async with session.delete(
                 f"{TRADE_BASE_URL}/v2/positions",
@@ -371,11 +371,33 @@ async def force_close_all_eod():
     except Exception as e:
         log(f"[EOD] Bulk-close error: {e}")
 
-    # Step 2: Wait for Alpaca fills to settle before clearing state
+    # Step 2: Wait for fills to settle
     log("[EOD] Waiting 8s for Alpaca fills to settle...")
     await asyncio.sleep(8)
 
-    # Step 3: clear bot state + Supabase unconditionally
+    # Step 3: Per-symbol fallback — catches unsettled orphan positions that
+    # survive bulk DELETE on paper trading (qty_available=0 but qty=1).
+    # DELETE /v2/positions/{symbol} works even for unsettled paper shares —
+    # this is what the Alpaca UI uses internally.
+    if session:
+        for symbol in positions:
+            try:
+                async with session.delete(
+                    f"{TRADE_BASE_URL}/v2/positions/{symbol}",
+                    headers=HEADERS
+                ) as resp:
+                    if resp.status in (200, 204):
+                        log(f"[EOD] ✅ Per-symbol close confirmed: {symbol}")
+                    elif resp.status == 404:
+                        pass  # already closed by bulk — expected
+                    else:
+                        body = await resp.text()
+                        log(f"[EOD] Per-symbol close {symbol} "
+                            f"status={resp.status}: {body[:80]}")
+            except Exception as e:
+                log(f"[EOD] Per-symbol close error {symbol}: {e}")
+
+    # Step 4: clear bot state + Supabase unconditionally
     for symbol in positions:
         await del_position(symbol)
         state.get("orphan_positions", set()).discard(symbol)
