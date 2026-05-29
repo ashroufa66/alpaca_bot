@@ -1,7 +1,7 @@
 """
 loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V20.9e"
+MODULE_VERSION = "V20.9f"
 # V19.5 fixes:
 #   1. position_reconciliation_loop — every 5 min, compares state["positions"]
 #      against Alpaca's actual positions. Auto-removes ghosts (qty=0 in Alpaca).
@@ -588,12 +588,12 @@ async def housekeeping_loop():
             else:
                 log("Market closed — waiting for open...")
 
-            # V20.9d: EOD wall-clock fallback — MUST be outside market_is_open()
-            # block. Market closes at 1:00 PM PT; Alpaca marks is_open=False
-            # slightly before 12:44 PT, causing the inner EOD check to be skipped.
-            # This runs unconditionally every housekeeping cycle.
+            # V20.9e: EOD wall-clock fallback — MUST be outside market_is_open()
+            # block. Market closes at 1:00 PM PT = 16:00 ET.
+            # Wall-clock triggers at 15:44 ET (12:44 PM PT) unconditionally.
+            # now_et() returns America/New_York — use ET hours, NOT PT hours.
             _et_now = now_et()
-            _eod_wall = (_et_now.hour == 12 and _et_now.minute >= 44) or _et_now.hour == 13
+            _eod_wall = (_et_now.hour == 15 and _et_now.minute >= 44) or _et_now.hour == 16
             if _eod_wall and state.get("positions") and not state.get("_eod_wall_fired"):
                 log(f"[EOD WALL] Wall-clock EOD fallback triggered "
                     f"({_et_now.strftime('%H:%M')} ET) — force-closing {len(state['positions'])} position(s)")
