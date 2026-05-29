@@ -1,7 +1,7 @@
 """
 loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V20.9f"
+MODULE_VERSION = "V20.9g"
 # V19.5 fixes:
 #   1. position_reconciliation_loop — every 5 min, compares state["positions"]
 #      against Alpaca's actual positions. Auto-removes ghosts (qty=0 in Alpaca).
@@ -490,7 +490,10 @@ async def entry_loop():
                                 entries_done += 1
                 elif entries_done < MAX_NEW_ENTRIES_PER_CYCLE and not state.get("vwap_trained", False):
                     _vwap_n = len(state.get("vwap_train_data", []))
-                    log(f"[VWAP BLOCK] Model untrained ({_vwap_n}/{VWAP_MODEL_MIN_SAMPLES}) — VWAP reversion entries disabled")
+                    _now_vb = time.time()
+                    if _now_vb - state.get("_vwap_block_last_log", 0) > 300:
+                        log(f"[VWAP BLOCK] Model untrained ({_vwap_n}/{VWAP_MODEL_MIN_SAMPLES}) — VWAP reversion entries disabled")
+                        state["_vwap_block_last_log"] = _now_vb
                 for oid, chase in list(state["smart_exec_orders"].items()):
                     if time.time() > chase.get("deadline", 0):
                         state["smart_exec_orders"].pop(oid, None)
