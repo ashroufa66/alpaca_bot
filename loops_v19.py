@@ -1,7 +1,7 @@
 """
 loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V20.9h"
+MODULE_VERSION = "V20.9i"
 # V19.5 fixes:
 #   1. position_reconciliation_loop — every 5 min, compares state["positions"]
 #      against Alpaca's actual positions. Auto-removes ghosts (qty=0 in Alpaca).
@@ -377,9 +377,23 @@ async def force_close_all_eod():
 
     # Step 3: Per-symbol fallback — catches unsettled orphan positions that
     # survive bulk DELETE on paper trading (qty_available=0 but qty=1).
-    # DELETE /v2/positions/{symbol} works even for unsettled paper shares —
-    # this is what the Alpaca UI uses internally.
+    # V20.9i: Cancel any pending orders first — "held_for_orders" blocks close.
     if session:
+        for symbol in positions:
+            try:
+                # Cancel all open orders for this symbol first
+                async with session.delete(
+                    f"{TRADE_BASE_URL}/v2/orders?symbol={symbol}",
+                    headers=HEADERS
+                ) as cancel_resp:
+                    if cancel_resp.status in (200, 204, 207):
+                        log(f"[EOD] Cancelled pending orders for {symbol}")
+                    # 404 = no open orders, that's fine
+            except Exception as e:
+                log(f"[EOD] Cancel orders error {symbol}: {e}")
+
+        await asyncio.sleep(2)  # brief pause for cancels to settle
+
         for symbol in positions:
             try:
                 async with session.delete(
