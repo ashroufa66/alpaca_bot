@@ -1,7 +1,7 @@
 """
 loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V20.9i"
+MODULE_VERSION = "V20.9j"
 # V19.5 fixes:
 #   1. position_reconciliation_loop — every 5 min, compares state["positions"]
 #      against Alpaca's actual positions. Auto-removes ghosts (qty=0 in Alpaca).
@@ -392,7 +392,7 @@ async def force_close_all_eod():
             except Exception as e:
                 log(f"[EOD] Cancel orders error {symbol}: {e}")
 
-        await asyncio.sleep(2)  # brief pause for cancels to settle
+        await asyncio.sleep(6)  # V20.9j: increased 2→6s — Alpaca cancel confirmation takes 3-5s async
 
         for symbol in positions:
             try:
