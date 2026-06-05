@@ -2,7 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.9n"
+MODULE_VERSION = "V20.9o"
 # V20.9c: Gap Day ATR floor 0.20%→0.10% (ARM-type consolidation was blocked)
 # V20.9b: Gap fallback uses state[prev_close] — IEX vol-confirm was always failing
 # V20.8: Gap Day Mode — 5 guards with slow-EMA dist + normalized VWAP slope
@@ -130,9 +130,9 @@ async def try_enter(symbol: str) -> bool:
             state.setdefault("iex_no_data", set()).add(symbol)
             return False
     # Skip symbols confirmed to have no IEX data this session
-    # V20.9i: cleared in websockets_handler when quote arrives — not permanent
     if symbol in state.get("iex_no_data", set()):
-        _log_halt_once(symbol + "_noquote", f"[ENTRY_SKIP] {symbol}: no IEX data — blacklisted (will clear on quote)")
+        return False
+        _log_halt_once(symbol + "_noquote", f"[ENTRY_SKIP] {symbol}: no quote data yet (WS reconnecting?)")
         return False
     # V17.8+: per-symbol 15s warmup after first quote — prevents stale fills
     if time.time() - state.get("quote_first_seen", {}).get(symbol, 0) < 15:
@@ -226,6 +226,11 @@ async def try_enter(symbol: str) -> bool:
 
         # Quick AI pre-check before expensive indicator calcs
         _chop_ai = ai_predict_probability(build_feature_vector(symbol, get_indicators(symbol))) if state.get("ai_trained") else -1.0
+        # V20.9n: AI floor — near-binary calibration outputs ~0% for most symbols
+        # with <800 samples. Floor at 0.25 prevents CHOP gate from blocking everything.
+        # Remove once win rate > 35% and samples > 800.
+        if _chop_ai >= 0:
+            _chop_ai = max(_chop_ai, 0.25)
 
         # Gate 1: AI confidence
         if _chop_ai >= 0 and _chop_ai < CHOP_AI_MIN_PROB:
@@ -497,6 +502,9 @@ async def try_enter(symbol: str) -> bool:
 
     if features:
         ai_prob = ai_predict_probability(features)
+        # V20.9n: floor matches CHOP gate floor — consistent behavior
+        if ai_prob >= 0:
+            ai_prob = max(ai_prob, 0.25)
 
         # V20.4: Hard block on fallback features stays — that's a real data quality fix.
         # V20.6: AI no longer hard-blocks on low probability.
@@ -666,16 +674,6 @@ async def try_exit(symbol: str) -> bool:
         # mark orphan in state so broker 403 handler ignores it
         state.setdefault("orphan_positions", set()).add(symbol)
 
-    # V20.9m: universal 403 backoff guard — skip exit attempt for ANY symbol
-    # in backoff, not just ones already in orphan_positions. New positions also
-    # get qty_available=0 on paper trading until T+1 settlement.
-    # V20.9n FIX: only skip if there's no urgent exit reason — always allow
-    # STOP_LOSS, TAKE_PROFIT, EOD, FLASH_CRASH through regardless of backoff.
-    # Backoff was blocking stop losses and letting winners turn into losers.
-    from broker import _orphan_403_backoff_until
-    _in_backoff = time.time() < _orphan_403_backoff_until.get(symbol, 0)
-    # We'll check exit reason below and override backoff for emergencies
-
     # V17.8+: read pos under lock so we get a consistent snapshot
     async with state["lock"]:
         pos = dict(state["positions"][symbol])   # snapshot copy — safe to read outside lock
@@ -697,24 +695,6 @@ async def try_exit(symbol: str) -> bool:
 
     stop_price = pos.get("stop_price") or (entry - atr_at_entry * ATR_STOP_MULT_BASE)
     tp_price   = pos.get("tp_price")   or (entry + (entry - stop_price) * TAKE_PROFIT_R_MULT)
-
-    # V20.9n: Hard percentage stop — overrides ATR stop if ATR is too loose
-    # Prevents IEX compressed ATR from giving back 1-2% before stopping out
-    _hard_stop = entry * (1 - HARD_STOP_PCT)
-    stop_price = max(stop_price, _hard_stop)  # tighter of the two
-
-    # V20.9n: Profit lock — once trade hits +0.6%, floor the stop at +0.2%
-    # Prevents winner → loser reversals on large-caps that retrace violently
-    _profit_lock_floor = entry * (1 + PROFIT_LOCK_FLOOR_PCT)
-    _profit_lock_trigger = entry * (1 + PROFIT_LOCK_TRIGGER_PCT)
-    if highest >= _profit_lock_trigger:
-        stop_price = max(stop_price, _profit_lock_floor)
-        # update stored stop_price so it persists across watchdog cycles
-        async with state["lock"]:
-            if symbol in state["positions"]:
-                _stored = state["positions"][symbol].get("stop_price", 0)
-                if _profit_lock_floor > _stored:
-                    state["positions"][symbol]["stop_price"] = _profit_lock_floor
 
     df             = get_indicators(symbol)
     trailing_mult  = get_adaptive_trailing_mult(df)
@@ -739,25 +719,13 @@ async def try_exit(symbol: str) -> bool:
     elif mid >= tp_price:
         reason = "TAKE_PROFIT"
     elif mid <= stop_price:
-        # distinguish profit-lock exits from normal stop losses in logs
-        if highest >= _profit_lock_trigger and stop_price >= _profit_lock_floor:
-            reason = "PROFIT_LOCK"
-        else:
-            reason = "STOP_LOSS"
+        reason = "STOP_LOSS"
     elif highest > entry and mid <= trailing_price:
         reason = "TRAILING_STOP"
     elif not df.empty and len(df) >= EMA_SLOW + 2 and bearish_cross(df):
         reason = "EMA_REVERSAL"
 
     if reason:
-        # V20.9n: backoff guard — block non-emergency exits when in 403 backoff.
-        # Emergency exits (SL, TP, EOD, crash) ALWAYS bypass backoff.
-        # Only trailing stop and EMA reversal are suppressed during backoff.
-        _emergency_reasons = {"STOP_LOSS", "TAKE_PROFIT", "SCALP_SL", "SCALP_TP",
-                               "EOD_EXIT", "FLASH_CRASH_EXIT", "FORCE_EXIT_CRASH",
-                               "PROFIT_LOCK"}
-        if _in_backoff and reason not in _emergency_reasons:
-            return False  # suppress trailing/EMA exits during backoff only
         qty = int(pos["qty"])
 
         # V20.2: Hard Alpaca position check — runs for ALL sells including orphans.
@@ -774,11 +742,20 @@ async def try_exit(symbol: str) -> bool:
             return False
         qty = min(qty, alpaca_qty)   # never sell more than Alpaca says we own
 
-        # V20.9n: Always use market orders for exits — limit orders can hang
-        # when bid disappears in fast moves, leaving position open.
-        # Speed and certainty > slippage on exits.
-        order = await async_submit_market_order(symbol, qty, "sell")
-        order_type_log = "MARKET"
+        # FIX V11.2: smart sell — use market order when spread is tight
+        # or when exiting due to emergency (flash crash, EOD, stop loss)
+        emergency_reasons = {"FLASH_CRASH_EXIT", "EOD_EXIT", "STOP_LOSS", "SCALP_SL"}
+        use_market = (
+            reason in emergency_reasons
+            or (q["spread_pct"] < 0.3)          # tight spread — safe to market sell
+            or (_is_scalp and reason == "SCALP_TP" and q["spread_pct"] < 0.2)  # fast TP fill
+        )
+        if use_market:
+            order = await async_submit_market_order(symbol, qty, "sell")
+            order_type_log = "MARKET"
+        else:
+            order = await async_submit_limit_order(symbol, qty, "sell", bid)  # FIX V12.6
+            order_type_log = "LIMIT"
 
         if order:
             oid = order["id"]
