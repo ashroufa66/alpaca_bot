@@ -3,7 +3,7 @@ config.py — All configuration constants and environment variables.
 Single source of truth for every tunable parameter.
 Import pattern: from config import *
 """
-MODULE_VERSION = "V20.9"
+MODULE_VERSION = "V20.10"
 # V20.6 changes:
 #   1. CHOP filters heavily relaxed (score 8→4, momentum 0.60→0.40, volume not required)
 #   2. AI threshold lowered 0.60→0.52 (AI for sizing only, not blocking)
@@ -52,7 +52,7 @@ HEADERS = {
 SIMULATED_ACCOUNT_SIZE = 10000.0   # V20.0: raised from $5,000 → $10,000
 
 # ── Scanner ────────────────────────────────────────────────
-MAX_SCAN_SYMBOLS          = 300   # V20.8: reduced 1500→300 — top movers only, better WS coverage
+MAX_SCAN_SYMBOLS          = 1500
 SNAPSHOT_BATCH_SIZE       = 150
 TOP_CANDIDATES            = 20
 SCAN_INTERVAL_SECONDS     = 75
@@ -101,7 +101,7 @@ REGIME_REFRESH_SECONDS = 120
 CHOP_MIN_SCORE         = 3.0   # V20.6: lowered 5→3
 # V20.6: Relaxed CHOP filters — over-filtering was killing profitability.
 # Market is CHOP most of the time. Previous strict settings blocked 95%+ of setups.
-CHOP_AI_MIN_PROB       = 0.52   # V20.6: lowered 0.65→0.52 (AI used for sizing, not hard blocking)
+CHOP_AI_MIN_PROB       = 0.25   # V20.10: matches AI floor — near-binary model outputs 0% for most symbols, floor lifts to 25%. Threshold must match floor to allow entries. Temporary until 800+ samples.
 
 # V20.3: Hard block entries when AI has no features (ai_prob == -1.0)
 # This stays — fallback features block is a real fix, not over-filtering.
@@ -113,7 +113,7 @@ CHOP_SIZE_FACTOR       = 0.70   # V20.6: raised 0.50→0.70 (less punishment in 
 
 # ── Risk Management ────────────────────────────────────────
 MAX_OPEN_POSITIONS        = 7
-MAX_TRADES_PER_DAY        = 10   # V20.8: reduced 25→10 — quality over quantity
+MAX_TRADES_PER_DAY        = 25
 DAILY_MAX_LOSS_USD        = 250.0
 MAX_POSITION_USD          = 2000.0   # V20.1: raised $500→$2000 to match $10K account
 MIN_POSITION_USD          = 50.0
@@ -134,16 +134,8 @@ ATR_STOP_MULT_CHOP     = 1.5
 ATR_STOP_MULT_BASE     = 1.5
 TRAILING_STOP_ATR_MULT = 1.0
 
-# V20.9n: Hard percentage stop — prevents runaway losses when IEX ATR is compressed
-# final_stop = max(atr_stop, pct_stop) — whichever is tighter (closer to entry)
-HARD_STOP_PCT           = 0.008  # 0.8% max loss from entry regardless of ATR
-
-# V20.9n: Profit lock — once trade reaches +0.6%, stop moves to +0.2% (locks min profit)
-PROFIT_LOCK_TRIGGER_PCT = 0.006  # gain % that triggers profit lock
-PROFIT_LOCK_FLOOR_PCT   = 0.002  # floor stop once locked in
-
 # ── Execution ──────────────────────────────────────────────
-TAKE_PROFIT_R_MULT    = 2.0   # V20.8: reduced 3.0→2.0 — more realistic for large-cap intraday
+TAKE_PROFIT_R_MULT    = 3.0
 MAX_SLIPPAGE_PCT      = 0.15
 ORDER_TIMEOUT_SECONDS = 20
 MIN_ORDER_INTERVAL_SEC    = 60
@@ -326,7 +318,7 @@ SWEEP_CLOSE_NEAR_HIGH  = 0.70
 SWEEP_COOLDOWN_SEC     = 45
 
 # ── VPIN ───────────────────────────────────────────────────
-VPIN_ENABLED           = False   # V20.8: disabled — noisy on IEX synthetic data
+VPIN_ENABLED           = True
 VPIN_BUCKET_SIZE       = 80
 VPIN_NUM_BUCKETS       = 10
 VPIN_HIGH_THRESHOLD    = 0.70
@@ -334,14 +326,14 @@ VPIN_EXTREME_THRESHOLD = 0.85
 VPIN_LOW_THRESHOLD     = 0.35
 
 # ── OBAD ───────────────────────────────────────────────────
-OBAD_ENABLED         = False   # V20.8: disabled — fake bid/ask acceleration on IEX
+OBAD_ENABLED         = True
 OBAD_LOOKBACK        = 8
 OBAD_ACCEL_THRESHOLD = 0.15
 OBAD_DECEL_THRESHOLD = -0.15
 OBAD_MIN_TICKS       = 4
 
 # ── LIP ────────────────────────────────────────────────────
-LIP_ENABLED           = False   # V20.8: disabled — unstable IEX bid_size inputs
+LIP_ENABLED           = True
 LIP_LOOKBACK          = 12
 LIP_BULLISH_THRESHOLD = 0.48
 LIP_BEARISH_THRESHOLD = 0.38
@@ -500,7 +492,7 @@ TRADE_FREQ_CHECK_INTERVAL   = 300   # check every 5 minutes
 
 # ── IEX Runtime Overrides (must be LAST) ──────────────────
 if DATA_FEED == "iex":
-    MAX_SPREAD_PCT         = 5.0   # V20.8: tightened 15→5% — 15% was effectively no filter
+    MAX_SPREAD_PCT         = 15.0
     MAX_PREDICTED_SPREAD   = 5.0
     MAX_SLIPPAGE_PCT       = 2.5   # V18.9: IEX "ideal" threshold.
     # Below 2.5% → full size. Above 2.5% → graduated reduction. Above 6% → hard block.
@@ -508,7 +500,7 @@ if DATA_FEED == "iex":
     # where even AAPL/AMD/META routinely show 0.5–1.5% spread.
     SPY_CORR_MIN_MOMENTUM  = -0.20
     SPY_CORR_LOOKBACK_BARS = 5
-    print(f"[CONFIG] IEX overrides applied (V20.8): MAX_SPREAD={MAX_SPREAD_PCT}% "
+    print(f"[CONFIG] IEX overrides applied: MAX_SPREAD={MAX_SPREAD_PCT}% "
           f"| slippage=graduated({MAX_SLIPPAGE_PCT}%→6%) "
           f"| SPY_MOMENTUM>={SPY_CORR_MIN_MOMENTUM}% "
           f"| SPY_LOOKBACK={SPY_CORR_LOOKBACK_BARS}bars")
