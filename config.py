@@ -52,7 +52,7 @@ HEADERS = {
 SIMULATED_ACCOUNT_SIZE = 10000.0   # V20.0: raised from $5,000 → $10,000
 
 # ── Scanner ────────────────────────────────────────────────
-MAX_SCAN_SYMBOLS          = 1500
+MAX_SCAN_SYMBOLS          = 300   # V20.8: reduced 1500→300 — top movers only
 SNAPSHOT_BATCH_SIZE       = 150
 TOP_CANDIDATES            = 20
 SCAN_INTERVAL_SECONDS     = 75
@@ -113,7 +113,7 @@ CHOP_SIZE_FACTOR       = 0.70   # V20.6: raised 0.50→0.70 (less punishment in 
 
 # ── Risk Management ────────────────────────────────────────
 MAX_OPEN_POSITIONS        = 7
-MAX_TRADES_PER_DAY        = 25
+MAX_TRADES_PER_DAY        = 10   # V20.8: reduced 25→10 — quality over quantity
 DAILY_MAX_LOSS_USD        = 250.0
 MAX_POSITION_USD          = 2000.0   # V20.1: raised $500→$2000 to match $10K account
 MIN_POSITION_USD          = 50.0
@@ -134,8 +134,13 @@ ATR_STOP_MULT_CHOP     = 1.5
 ATR_STOP_MULT_BASE     = 1.5
 TRAILING_STOP_ATR_MULT = 1.0
 
+# V20.9n: Hard percentage stop + profit lock
+HARD_STOP_PCT           = 0.008  # 0.8% max loss from entry regardless of ATR
+PROFIT_LOCK_TRIGGER_PCT = 0.006  # 0.6% gain triggers profit lock
+PROFIT_LOCK_FLOOR_PCT   = 0.002  # lock floor at +0.2% above entry
+
 # ── Execution ──────────────────────────────────────────────
-TAKE_PROFIT_R_MULT    = 3.0
+TAKE_PROFIT_R_MULT    = 2.0   # V20.8: reduced 3.0→2.0 — more realistic for large-cap intraday
 MAX_SLIPPAGE_PCT      = 0.15
 ORDER_TIMEOUT_SECONDS = 20
 MIN_ORDER_INTERVAL_SEC    = 60
@@ -318,7 +323,7 @@ SWEEP_CLOSE_NEAR_HIGH  = 0.70
 SWEEP_COOLDOWN_SEC     = 45
 
 # ── VPIN ───────────────────────────────────────────────────
-VPIN_ENABLED           = True
+VPIN_ENABLED           = False   # V20.8: disabled — noisy on IEX synthetic data
 VPIN_BUCKET_SIZE       = 80
 VPIN_NUM_BUCKETS       = 10
 VPIN_HIGH_THRESHOLD    = 0.70
@@ -326,14 +331,14 @@ VPIN_EXTREME_THRESHOLD = 0.85
 VPIN_LOW_THRESHOLD     = 0.35
 
 # ── OBAD ───────────────────────────────────────────────────
-OBAD_ENABLED         = True
+OBAD_ENABLED         = False   # V20.8: disabled — fake bid/ask acceleration on IEX
 OBAD_LOOKBACK        = 8
 OBAD_ACCEL_THRESHOLD = 0.15
 OBAD_DECEL_THRESHOLD = -0.15
 OBAD_MIN_TICKS       = 4
 
 # ── LIP ────────────────────────────────────────────────────
-LIP_ENABLED           = True
+LIP_ENABLED           = False   # V20.8: disabled — unstable IEX bid_size inputs
 LIP_LOOKBACK          = 12
 LIP_BULLISH_THRESHOLD = 0.48
 LIP_BEARISH_THRESHOLD = 0.38
@@ -492,7 +497,7 @@ TRADE_FREQ_CHECK_INTERVAL   = 300   # check every 5 minutes
 
 # ── IEX Runtime Overrides (must be LAST) ──────────────────
 if DATA_FEED == "iex":
-    MAX_SPREAD_PCT         = 15.0
+    MAX_SPREAD_PCT         = 5.0   # V20.8: tightened 15→5%
     MAX_PREDICTED_SPREAD   = 5.0
     MAX_SLIPPAGE_PCT       = 2.5   # V18.9: IEX "ideal" threshold.
     # Below 2.5% → full size. Above 2.5% → graduated reduction. Above 6% → hard block.
