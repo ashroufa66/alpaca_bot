@@ -1,7 +1,7 @@
 """
 loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V20.9j"
+MODULE_VERSION = "V20.9k"
 # V19.5 fixes:
 #   1. position_reconciliation_loop — every 5 min, compares state["positions"]
 #      against Alpaca's actual positions. Auto-removes ghosts (qty=0 in Alpaca).
@@ -396,6 +396,23 @@ async def force_close_all_eod():
 
         for symbol in positions:
             try:
+                # V20.9k: Check current qty BEFORE per-symbol DELETE.
+                # If bulk DELETE already closed the long, qty=0 or missing.
+                # Firing DELETE on a closed position creates a short sell — bug.
+                async with session.get(
+                    f"{TRADE_BASE_URL}/v2/positions/{symbol}",
+                    headers=HEADERS
+                ) as check_resp:
+                    if check_resp.status == 404:
+                        log(f"[EOD] {symbol} already closed by bulk DELETE — skipping per-symbol")
+                        continue
+                    if check_resp.status == 200:
+                        check_data = await check_resp.json()
+                        current_qty = float(check_data.get("qty", 0))
+                        if current_qty <= 0:
+                            log(f"[EOD] {symbol} qty={current_qty} after bulk close — skipping per-symbol")
+                            continue
+
                 async with session.delete(
                     f"{TRADE_BASE_URL}/v2/positions/{symbol}",
                     headers=HEADERS
@@ -403,7 +420,7 @@ async def force_close_all_eod():
                     if resp.status in (200, 204):
                         log(f"[EOD] ✅ Per-symbol close confirmed: {symbol}")
                     elif resp.status == 404:
-                        pass  # already closed by bulk — expected
+                        pass  # already closed — expected
                     else:
                         body = await resp.text()
                         log(f"[EOD] Per-symbol close {symbol} "
@@ -633,11 +650,20 @@ async def housekeeping_loop():
             # now_et() returns America/New_York — use ET hours, NOT PT hours.
             _et_now = now_et()
             _eod_wall = (_et_now.hour == 15 and _et_now.minute >= 44) or _et_now.hour == 16
-            if _eod_wall and state.get("positions") and not state.get("_eod_wall_fired"):
-                log(f"[EOD WALL] Wall-clock EOD fallback triggered "
-                    f"({_et_now.strftime('%H:%M')} ET) — force-closing {len(state['positions'])} position(s)")
-                state["_eod_wall_fired"] = True
-                await force_close_all_eod()
+            if _eod_wall and not state.get("_eod_wall_fired"):
+                # V20.9k: always run shorts cleanup at EOD — catches shorts
+                # created by previous EOD over-sell, invisible to bot state
+                from broker import close_all_shorts_eod as _cover_shorts
+                _shorts_result = await _cover_shorts()
+                if _shorts_result > 0:
+                    log(f"[EOD WALL] Covered {_shorts_result} stray short(s) ✅")
+                if state.get("positions"):
+                    log(f"[EOD WALL] Wall-clock EOD fallback triggered "
+                        f"({_et_now.strftime('%H:%M')} ET) — force-closing {len(state['positions'])} position(s)")
+                    state["_eod_wall_fired"] = True
+                    await force_close_all_eod()
+                else:
+                    state["_eod_wall_fired"] = True
         except Exception as e:
             log(f"Housekeeping loop error: {e}")
         _open = state["clock_cache_is_open"]
