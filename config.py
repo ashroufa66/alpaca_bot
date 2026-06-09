@@ -112,7 +112,7 @@ CHOP_VOLUME_REQUIRED   = False  # V20.6: removed mandatory volume spike in CHOP
 CHOP_SIZE_FACTOR       = 0.70   # V20.6: raised 0.50→0.70 (less punishment in CHOP)
 
 # ── Risk Management ────────────────────────────────────────
-MAX_OPEN_POSITIONS        = 7
+MAX_OPEN_POSITIONS        = 3    # V20.10: reduced 7→3 — paper settlement means all positions are unsellable immediately, fewer is better
 MAX_TRADES_PER_DAY        = 10   # V20.8: reduced 25→10 — quality over quantity
 DAILY_MAX_LOSS_USD        = 250.0
 MAX_POSITION_USD          = 2000.0   # V20.1: raised $500→$2000 to match $10K account
