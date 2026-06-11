@@ -1,7 +1,7 @@
 """
 loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V20.9k"
+MODULE_VERSION = "V20.9l"
 # V19.5 fixes:
 #   1. position_reconciliation_loop — every 5 min, compares state["positions"]
 #      against Alpaca's actual positions. Auto-removes ghosts (qty=0 in Alpaca).
@@ -486,6 +486,10 @@ async def entry_loop():
     while True:
         try:
             if await market_is_open():
+                # V20.9l: block new entries after EOD wall-clock fired
+                if state.get("_eod_wall_fired"):
+                    await asyncio.sleep(30)
+                    continue
                 if not equity_trail_allows_entry():
                     await asyncio.sleep(60)
                     continue
