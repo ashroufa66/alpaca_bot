@@ -1,7 +1,7 @@
 """
 models.py — XGBoost/RF momentum model, VWAP model, VWAP reversion entry.
 """
-MODULE_VERSION = "V20.9k"
+MODULE_VERSION = "V20.11"
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -765,8 +765,27 @@ def can_open_new_position() -> tuple:
         return False, f"consec-loss pause ({remaining:.0f}s remaining)"
     if not state["consec_loss_bar_confirmed"]:
         return False, "waiting for bar confirmation after consec-loss pause"
-    if len(state["positions"])     >= MAX_OPEN_POSITIONS:
-        return False, f"max positions ({len(state['positions'])}/{MAX_OPEN_POSITIONS})"
+    # V20.11: Count in-flight entries (reserved + order-submitted-but-not-
+    # yet-filled) alongside confirmed positions, closing the race where
+    # multiple symbols all pass this check in the same scan tick before
+    # any of their positions are registered (positions are only written
+    # on fill confirmation, which arrives later via broker/websocket).
+    # Two sources of "in-flight but not yet a position":
+    #   1. _entry_reservations (strategy.py) — set synchronously the
+    #      instant a symbol passes THIS check, before any further awaits.
+    #   2. pending_orders with side="buy" — the order has been submitted
+    #      to Alpaca but the fill hasn't landed yet.
+    # Deferred import avoids a circular import (strategy.py imports from
+    # models.py at module load time).
+    from strategy import _entry_reservations
+    _in_flight = len(_entry_reservations | {
+        o.get("symbol") for o in state.get("pending_orders", {}).values()
+        if o.get("side") == "buy"
+    })
+    _open_or_reserved = len(state["positions"]) + _in_flight
+    if _open_or_reserved >= MAX_OPEN_POSITIONS:
+        return False, (f"max positions ({len(state['positions'])}/{MAX_OPEN_POSITIONS}, "
+                        f"+{_in_flight} in-flight)")
     equity = max(state["account_equity"], 0.0)
     if equity > 0 and current_exposure_usd() >= equity * MAX_TOTAL_EXPOSURE_PCT:
         exp = current_exposure_usd()
