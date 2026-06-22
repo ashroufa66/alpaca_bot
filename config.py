@@ -3,7 +3,7 @@ config.py — All configuration constants and environment variables.
 Single source of truth for every tunable parameter.
 Import pattern: from config import *
 """
-MODULE_VERSION = "V20.10"
+MODULE_VERSION = "V20.12"
 # V20.6 changes:
 #   1. CHOP filters heavily relaxed (score 8→4, momentum 0.60→0.40, volume not required)
 #   2. AI threshold lowered 0.60→0.52 (AI for sizing only, not blocking)
@@ -101,7 +101,7 @@ REGIME_REFRESH_SECONDS = 120
 CHOP_MIN_SCORE         = 3.0   # V20.6: lowered 5→3
 # V20.6: Relaxed CHOP filters — over-filtering was killing profitability.
 # Market is CHOP most of the time. Previous strict settings blocked 95%+ of setups.
-CHOP_AI_MIN_PROB       = 0.25   # V20.10: matches AI floor — near-binary model outputs 0% for most symbols, floor lifts to 25%. Threshold must match floor to allow entries. Temporary until 800+ samples.
+CHOP_AI_MIN_PROB       = 0.40   # V20.12: raised 0.25->0.40 to filter floor-triggered zero-edge trades. Floor lifts near-zero AI to 0.25, but 0.25 entries have no real signal (3/10 observed fills were exactly 25.00%). Real signals start at 34%+. Setting 0.40 blocks all floor trades. Does NOT reintroduce V20.9o 100%-blocked bug (floor runs first: 0.25 < 0.40 = correctly blocked).
 
 # V20.3: Hard block entries when AI has no features (ai_prob == -1.0)
 # This stays — fallback features block is a real fix, not over-filtering.
