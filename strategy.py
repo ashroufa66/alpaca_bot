@@ -2,7 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.11"
+MODULE_VERSION = "V20.12"
 # V20.9c: Gap Day ATR floor 0.20%→0.10% (ARM-type consolidation was blocked)
 # V20.9b: Gap fallback uses state[prev_close] — IEX vol-confirm was always failing
 # V20.8: Gap Day Mode — 5 guards with slow-EMA dist + normalized VWAP slope
@@ -70,35 +70,25 @@ from database import (supa_save_trade_history, supa_save_open_position,
 # Any second sell within SELL_LOCK_SECONDS is silently blocked.
 _sell_lock: dict[str, float] = {}
 
-# ── V20.11: Per-symbol entry slot reservation ──────────────
-# Symbol is added here synchronously the instant it passes the
-# MAX_OPEN_POSITIONS cap check in _try_enter_inner, BEFORE any further
-# awaits. Counted by can_open_new_position() alongside positions and
-# pending_orders so concurrent try_enter() calls in the same scan tick
-# can't all pass the cap before any of their orders are registered.
-# Released by the try_enter() wrapper once the call completes (whether
-# it placed an order or not — pending_orders takes over counting once
-# a real order exists).
-_entry_reservations: set[str] = set()
+# ── V20.12: DEBUG BLOCK log throttle ──────────────────────
+# DEBUG BLOCK fires every scan cycle (~10s) for every candidate
+# that fails a technical gate — 20-30 lines per cycle, ~14% of
+# log volume. Throttle to once per 5 min per (symbol, reason).
+# Key: f"{symbol}:{reason_tag}" → last-logged timestamp.
+_DEBUG_BLOCK_THROTTLE_SECS = 300   # 5 minutes
+_debug_block_last_logged: dict[str, float] = {}
 
+def _log_debug_block(symbol: str, reason_tag: str, msg: str) -> None:
+    """Log a DEBUG BLOCK message at most once per 5 min per symbol+reason."""
+    key = f"{symbol}:{reason_tag}"
+    now = time.time()
+    if now - _debug_block_last_logged.get(key, 0) >= _DEBUG_BLOCK_THROTTLE_SECS:
+        _debug_block_last_logged[key] = now
+        log(msg)
 # ENTRY — MOMENTUM STRATEGY
 # =========================================================
 
 async def try_enter(symbol: str) -> bool:
-    """
-    V20.11: Thin wrapper that guarantees _entry_reservations is always
-    cleaned up after _try_enter_inner() returns, regardless of which gate
-    inside it rejected the symbol (or whether it succeeded). The reservation
-    itself is only ever added inside _try_enter_inner, right after the
-    MAX_OPEN_POSITIONS cap check passes — see the V20.11 comment there.
-    """
-    try:
-        return await _try_enter_inner(symbol)
-    finally:
-        _entry_reservations.discard(symbol)
-
-
-async def _try_enter_inner(symbol: str) -> bool:
     # V18.9: SPY/QQQ are keepalive symbols — never trade them directly
     if symbol in ("SPY", "QQQ"):
         return False
@@ -146,21 +136,6 @@ async def _try_enter_inner(symbol: str) -> bool:
     if not _ok:
         log(f"[GATE] {symbol} | {_reason}")
         return False
-    # V20.11: Reserve this symbol's slot the instant the cap check passes —
-    # synchronous, no await yet, so no other try_enter() call for a different
-    # symbol can interleave here. This closes the race where 5+ symbols all
-    # passed can_open_new_position() in the same scan tick: each one's await
-    # on regime detection / AI inference let the next symbol's check run
-    # before the first symbol's position was registered (positions are only
-    # written on fill, which arrives later via the broker/websocket callback).
-    # We use a dedicated set (_entry_reservations) rather than pending_symbols
-    # because the buy path below explicitly clears pending_symbols on submit
-    # (line ~688, "ensure clean state" for sell-side reuse of that set) —
-    # reusing it here would get wiped out from under this reservation.
-    # try_enter() releases this reservation in a finally block once the
-    # order either lands in pending_orders (reservation no longer needed —
-    # pending_orders itself is now counted) or this function exits early.
-    _entry_reservations.add(symbol)
     if symbol not in state["quotes"]:
         # V17.8+: track how long symbol has had no quote
         # If no quote for >60s after subscription, likely no IEX data for this symbol
@@ -250,7 +225,7 @@ async def _try_enter_inner(symbol: str) -> bool:
     # They were pre-selected by the large-cap whitelist, not the momentum scanner
     has_scanner_detail = bool(detail)
     if tod_quality < 1.0 and has_scanner_detail and detail_score < (CHOP_MIN_SCORE / tod_quality):
-        log(f"[DEBUG BLOCK] {symbol} | TOD quality={tod_quality:.2f} score={detail_score:.1f}")
+        _log_debug_block(symbol, "tod", f"[DEBUG BLOCK] {symbol} | TOD quality={tod_quality:.2f} score={detail_score:.1f}")
         return False   # lunch lull — only trade strong setups
 
     if regime == "chop":
@@ -339,10 +314,10 @@ async def _try_enter_inner(symbol: str) -> bool:
         _close_v  = float(df["c"].iloc[-1] or 0) if len(df) > 0 else 0
         _atr_pct_v = (_atr_val / _close_v * 100.0) if _close_v > 0 else 0
         if _atr_pct_v < 0.10:   # 0.10% minimum for scalp — end-of-day vol is compressed
-            log(f"[DEBUG BLOCK] {symbol} | bear scalp: ATR too small ({_atr_pct_v:.2f}%<0.10%)")
+            _log_debug_block(symbol, "atr_scalp", f"[DEBUG BLOCK] {symbol} | bear scalp: ATR too small ({_atr_pct_v:.2f}%<0.10%)")
             return False
         if not _has_volume and _intraday_str < MOMENTUM_WEAK:
-            log(f"[DEBUG BLOCK] {symbol} | bear scalp: no volume + weak momentum")
+            _log_debug_block(symbol, "vol_scalp", f"[DEBUG BLOCK] {symbol} | bear scalp: no volume + weak momentum")
             return False
         ob_imbalance = 0.0   # skip OB check in bear — bearish imbalance is expected
     else:
@@ -435,16 +410,15 @@ async def _try_enter_inner(symbol: str) -> bool:
             # ── Normal (non-gap) gate stack ─────────────────────────────────────
             if not _has_cross:
                 if _intraday_str < MOMENTUM_MED:
-                    log(f"[DEBUG BLOCK] {symbol} | no EMA cross + weak momentum "
-                        f"(strength={_intraday_str:.2f})")
+                    _log_debug_block(symbol, "ema_mom", f"[DEBUG BLOCK] {symbol} | no EMA cross + weak momentum (strength={_intraday_str:.2f})")
                     return False
 
             if not _has_sep and _signals_ok < 2:
-                log(f"[DEBUG BLOCK] {symbol} | EMA not separated + only {_signals_ok}/3 signals")
+                _log_debug_block(symbol, "ema_sep", f"[DEBUG BLOCK] {symbol} | EMA not separated + only {_signals_ok}/3 signals")
                 return False
 
             if not atr_ok(df):
-                log(f"[DEBUG BLOCK] {symbol} | ATR too small")
+                _log_debug_block(symbol, "atr", f"[DEBUG BLOCK] {symbol} | ATR too small")
                 return False
 
         if not _has_volume and _intraday_str < MOMENTUM_WEAK:
@@ -471,7 +445,7 @@ async def _try_enter_inner(symbol: str) -> bool:
         ob_imbalance = calc_order_book_imbalance(symbol)
 
     if not _bear_mode and ob_imbalance < -0.6:
-        log(f"[DEBUG BLOCK] {symbol} | OB imbalance bearish ({ob_imbalance:.2f})")
+        _log_debug_block(symbol, "ob", f"[DEBUG BLOCK] {symbol} | OB imbalance bearish ({ob_imbalance:.2f})")
         return False
 
     # V11.0: RSI filter — avoid overbought entries
@@ -583,10 +557,11 @@ async def _try_enter_inner(symbol: str) -> bool:
             log(f"[CONF REDUCE] {symbol} | conf={conf_score:.2f}<{CONFIDENCE_MIN_SCORE} "
                 f"regime=chop → size×0.60")
         else:
-            log(f"[DEBUG BLOCK] {symbol} | conf={conf_score:.2f}<{CONFIDENCE_MIN_SCORE} "
-                f"ai={ai_prob:.2f} regime={_regime_now} "
-                f"breadth={state.get('breadth_score',0):.2f} "
-                f"spread={state['scanner_details'].get(symbol,{}).get('spread_pct',0):.1f}%")
+            _log_debug_block(symbol, "conf",
+                f"[DEBUG BLOCK] {symbol} | conf={conf_score:.2f}<{CONFIDENCE_MIN_SCORE}"
+                f" ai={ai_prob:.2f} regime={_regime_now}"
+                f" breadth={state.get('breadth_score',0):.2f}"
+                f" spread={state['scanner_details'].get(symbol,{}).get('spread_pct',0):.1f}%")
             return False
 
     # V18.9: Single unified min() factor — ALL reductions applied once, no cascade.
