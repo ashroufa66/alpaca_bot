@@ -1,7 +1,7 @@
 """
 models.py — XGBoost/RF momentum model, VWAP model, VWAP reversion entry.
 """
-MODULE_VERSION = "V20.11"
+MODULE_VERSION = "V20.13"
 import os, json, time, math, asyncio, csv
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -765,23 +765,19 @@ def can_open_new_position() -> tuple:
         return False, f"consec-loss pause ({remaining:.0f}s remaining)"
     if not state["consec_loss_bar_confirmed"]:
         return False, "waiting for bar confirmation after consec-loss pause"
-    # V20.11: Count in-flight entries (reserved + order-submitted-but-not-
-    # yet-filled) alongside confirmed positions, closing the race where
-    # multiple symbols all pass this check in the same scan tick before
-    # any of their positions are registered (positions are only written
-    # on fill confirmation, which arrives later via broker/websocket).
-    # Two sources of "in-flight but not yet a position":
-    #   1. _entry_reservations (strategy.py) — set synchronously the
-    #      instant a symbol passes THIS check, before any further awaits.
-    #   2. pending_orders with side="buy" — the order has been submitted
-    #      to Alpaca but the fill hasn't landed yet.
-    # Deferred import avoids a circular import (strategy.py imports from
-    # models.py at module load time).
-    from strategy import _entry_reservations
-    _in_flight = len(_entry_reservations | {
+    # V20.13: Count pending buy orders alongside confirmed positions to
+    # reduce the position-cap race (multiple candidates passing the check
+    # before any fill is registered). Using pending_orders buy-side only —
+    # no import from strategy.py needed, avoiding the circular import that
+    # caused the V20.11 deferred import to fail on some deploys.
+    # Note: _entry_reservations removed — it required a fragile deferred
+    # import from strategy.py which broke the entry loop when strategy.py
+    # was deployed without that symbol (seen June 24 2026).
+    _pending_buy_symbols = {
         o.get("symbol") for o in state.get("pending_orders", {}).values()
-        if o.get("side") == "buy"
-    })
+        if o.get("side") == "buy" and o.get("symbol")
+    }
+    _in_flight = len(_pending_buy_symbols - set(state["positions"].keys()))
     _open_or_reserved = len(state["positions"]) + _in_flight
     if _open_or_reserved >= MAX_OPEN_POSITIONS:
         return False, (f"max positions ({len(state['positions'])}/{MAX_OPEN_POSITIONS}, "
