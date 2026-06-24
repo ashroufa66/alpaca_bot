@@ -2,7 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.12"
+MODULE_VERSION = "V20.13"
 # V20.9c: Gap Day ATR floor 0.20%→0.10% (ARM-type consolidation was blocked)
 # V20.9b: Gap fallback uses state[prev_close] — IEX vol-confirm was always failing
 # V20.8: Gap Day Mode — 5 guards with slow-EMA dist + normalized VWAP slope
@@ -304,8 +304,9 @@ async def try_enter(symbol: str) -> bool:
             return False
         # Flag for size reduction
         state.setdefault("_chop_reduce", set()).add(symbol)
-        log(f"[CHOP PASS] {symbol} | score={state['scanner_details'].get(symbol,{}).get('score',0):.1f} "
-            f"momentum={_intraday_str:.2f} volume={_has_volume} → size×{CHOP_SIZE_FACTOR:.0%}")
+        _log_debug_block(symbol, "chop_pass",
+            f"[CHOP PASS] {symbol} | score={state['scanner_details'].get(symbol,{}).get('score',0):.1f}"
+            f" momentum={_intraday_str:.2f} volume={_has_volume} → size×{CHOP_SIZE_FACTOR:.0%}")
 
     if _bear_mode:
         # V18.9: Bear scalp — bypass bullish-biased gates (EMA cross, VWAP, OB imbalance)
@@ -352,9 +353,10 @@ async def try_enter(symbol: str) -> bool:
 
             # Guard 1: price above both EMAs — gap holding, not fading
             if not (_price_now > _ema_f_now > 0 and _price_now > _ema_s_now > 0):
-                log(f"[GAP DAY BLOCK] {symbol} | price not above both EMAs "
-                    f"(gap={_gap_pct:+.1f}% price={_price_now:.2f} "
-                    f"ema_fast={_ema_f_now:.2f} ema_slow={_ema_s_now:.2f})")
+                _log_debug_block(symbol, "gap_emas",
+                    f"[GAP DAY BLOCK] {symbol} | price not above both EMAs"
+                    f" (gap={_gap_pct:+.1f}% price={_price_now:.2f}"
+                    f" ema_fast={_ema_f_now:.2f} ema_slow={_ema_s_now:.2f})")
                 return False
 
             # Guard 2: price-to-SLOW-EMA distance >= 0.2%
@@ -362,7 +364,8 @@ async def try_enter(symbol: str) -> bool:
             # Slow EMA distance = real trend strength vs EMAs catching up after flat drift.
             _ema_dist = (_price_now - _ema_s_now) / _price_now if _price_now > 0 else 0.0
             if _ema_dist < 0.002:
-                log(f"[GAP DAY BLOCK] {symbol} | price too close to slow EMA — weak trend "
+                _log_debug_block(symbol, "gap_price",
+                    f"[GAP DAY BLOCK] {symbol} | price too close to slow EMA — weak trend "
                     f"(gap={_gap_pct:+.1f}% ema_dist={_ema_dist:.2%} < 0.20%)")
                 return False
 
@@ -371,13 +374,15 @@ async def try_enter(symbol: str) -> bool:
             # blocks genuine distribution (slope <= -0.05%)
             if _vwap_now > 0:
                 if _price_now < _vwap_now:
-                    log(f"[GAP DAY BLOCK] {symbol} | price below VWAP "
+                    _log_debug_block(symbol, "gap_price",
+                        f"[GAP DAY BLOCK] {symbol} | price below VWAP "
                         f"(gap={_gap_pct:+.1f}% price={_price_now:.2f} vwap={_vwap_now:.2f})")
                     return False
                 if len(df) >= 4:
                     _vwap_slope = (float(df["vwap"].iloc[-1]) - float(df["vwap"].iloc[-4])) / _vwap_now
                     if _vwap_slope <= -0.0005:   # normalized -0.05% — blocks real decline, allows flat
-                        log(f"[GAP DAY BLOCK] {symbol} | VWAP declining "
+                        _log_debug_block(symbol, "gap_vwap",
+                            f"[GAP DAY BLOCK] {symbol} | VWAP declining "
                             f"(gap={_gap_pct:+.1f}% slope={_vwap_slope:.4%})")
                         return False
 
@@ -389,7 +394,8 @@ async def try_enter(symbol: str) -> bool:
                 else:                 _max_dist = 0.02
                 _dist_vwap = abs(_price_now - _vwap_now) / _vwap_now
                 if _dist_vwap > _max_dist:
-                    log(f"[GAP DAY BLOCK] {symbol} | too far from VWAP "
+                    _log_debug_block(symbol, "gap_too",
+                        f"[GAP DAY BLOCK] {symbol} | too far from VWAP "
                         f"({_dist_vwap:.2%} > {_max_dist:.0%} for gap={_gap_pct:+.1f}%)")
                     return False
 
@@ -399,13 +405,15 @@ async def try_enter(symbol: str) -> bool:
             _atr_val = float(df["atr"].iloc[-1] or 0) if len(df) > 0 else 0.0
             _atr_pct = (_atr_val / _price_now) if _price_now > 0 else 0.0
             if _atr_pct < 0.001:
-                log(f"[GAP DAY BLOCK] {symbol} | ATR too dead ({_atr_pct:.2%} < 0.10%)")
+                _log_debug_block(symbol, "gap_atr",
+                    f"[GAP DAY BLOCK] {symbol} | ATR too dead ({_atr_pct:.2%} < 0.10%)")
                 return False
 
             _signed_dist = (_price_now - _vwap_now) / _vwap_now if _vwap_now > 0 else 0.0
-            log(f"[GAP DAY PASS] {symbol} | gap={_gap_pct:+.1f}% "
-                f"dist_vwap={_signed_dist:+.2%} max={_max_dist:.0%} "
-                f"ema_dist={_ema_dist:.2%} atr={_atr_pct:.2%}")
+            _log_debug_block(symbol, "gap_pass",
+                f"[GAP DAY PASS] {symbol} | gap={_gap_pct:+.1f}%"
+                f" dist_vwap={_signed_dist:+.2%} max={_max_dist:.0%}"
+                f" ema_dist={_ema_dist:.2%} atr={_atr_pct:.2%}")
         else:
             # ── Normal (non-gap) gate stack ─────────────────────────────────────
             if not _has_cross:
