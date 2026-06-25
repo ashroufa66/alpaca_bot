@@ -2,7 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.13"
+MODULE_VERSION = "V20.14"
 # V20.9c: Gap Day ATR floor 0.20%→0.10% (ARM-type consolidation was blocked)
 # V20.9b: Gap fallback uses state[prev_close] — IEX vol-confirm was always failing
 # V20.8: Gap Day Mode — 5 guards with slow-EMA dist + normalized VWAP slope
@@ -209,12 +209,21 @@ async def try_enter(symbol: str) -> bool:
     if _bear_mode:
         # V18.9: Controlled aggression — allow entries in bear but use scalp params
         # V20.9h: Add AI check to bear mode — ai=0.00% entries were bypassing CHOP gate
-        # and getting stopped out immediately on IEX wide spreads.
+        #         and getting stopped out immediately on IEX wide spreads.
+        # V20.14: Raised bear AI threshold from 0.05 → CHOP_AI_MIN_PROB (0.40).
+        #         Floor lifts near-zero outputs to 0.25, so the old 0.05 check never
+        #         fired — floor-triggered trades (ai=25.00%) were entering freely in
+        #         BEAR just like they were in BULL. Now consistent with CHOP gate.
+        #         Apply AFTER floor (floor runs at line ~522) by checking the floored
+        #         value here: max(raw, 0.25) < CHOP_AI_MIN_PROB → block.
         if state.get("ai_trained"):
             _bear_ai = ai_predict_probability(build_feature_vector(symbol, get_indicators(symbol)))
-            if _bear_ai >= 0 and _bear_ai < 0.05:
-                log(f"[BEAR BLOCK] {symbol} | AI={_bear_ai:.2%} < 5% — skipping bear scalp")
-                return False
+            if _bear_ai >= 0:
+                _bear_ai_floored = max(_bear_ai, 0.25)
+                if _bear_ai_floored < CHOP_AI_MIN_PROB:
+                    _log_debug_block(symbol, "bear_ai",
+                        f"[BEAR BLOCK] {symbol} | AI={_bear_ai_floored:.2%} < {CHOP_AI_MIN_PROB:.0%} required in BEAR")
+                    return False
         _log_halt_once(f"bear_scalp_{symbol}", f"[BEAR SCALP] {symbol} | bear regime — tight TP/SL")
 
     # V11.0: time-of-day quality filter
@@ -365,8 +374,8 @@ async def try_enter(symbol: str) -> bool:
             _ema_dist = (_price_now - _ema_s_now) / _price_now if _price_now > 0 else 0.0
             if _ema_dist < 0.002:
                 _log_debug_block(symbol, "gap_price",
-                    f"[GAP DAY BLOCK] {symbol} | price too close to slow EMA — weak trend "
-                    f"(gap={_gap_pct:+.1f}% ema_dist={_ema_dist:.2%} < 0.20%)")
+                    f"[GAP DAY BLOCK] {symbol} | price too close to slow EMA — weak trend"
+                    f" (gap={_gap_pct:+.1f}% ema_dist={_ema_dist:.2%} < 0.20%)")
                 return False
 
             # Guard 3: price at/above VWAP AND VWAP not in real decline
@@ -374,16 +383,16 @@ async def try_enter(symbol: str) -> bool:
             # blocks genuine distribution (slope <= -0.05%)
             if _vwap_now > 0:
                 if _price_now < _vwap_now:
-                    _log_debug_block(symbol, "gap_price",
-                        f"[GAP DAY BLOCK] {symbol} | price below VWAP "
-                        f"(gap={_gap_pct:+.1f}% price={_price_now:.2f} vwap={_vwap_now:.2f})")
+                    _log_debug_block(symbol, "gap_vwap_below",
+                        f"[GAP DAY BLOCK] {symbol} | price below VWAP"
+                        f" (gap={_gap_pct:+.1f}% price={_price_now:.2f} vwap={_vwap_now:.2f})")
                     return False
                 if len(df) >= 4:
                     _vwap_slope = (float(df["vwap"].iloc[-1]) - float(df["vwap"].iloc[-4])) / _vwap_now
                     if _vwap_slope <= -0.0005:   # normalized -0.05% — blocks real decline, allows flat
                         _log_debug_block(symbol, "gap_vwap",
-                            f"[GAP DAY BLOCK] {symbol} | VWAP declining "
-                            f"(gap={_gap_pct:+.1f}% slope={_vwap_slope:.4%})")
+                            f"[GAP DAY BLOCK] {symbol} | VWAP declining"
+                            f" (gap={_gap_pct:+.1f}% slope={_vwap_slope:.4%})")
                         return False
 
             # Guard 4: tiered VWAP distance — abs() catches both overextension and
@@ -395,8 +404,8 @@ async def try_enter(symbol: str) -> bool:
                 _dist_vwap = abs(_price_now - _vwap_now) / _vwap_now
                 if _dist_vwap > _max_dist:
                     _log_debug_block(symbol, "gap_too",
-                        f"[GAP DAY BLOCK] {symbol} | too far from VWAP "
-                        f"({_dist_vwap:.2%} > {_max_dist:.0%} for gap={_gap_pct:+.1f}%)")
+                        f"[GAP DAY BLOCK] {symbol} | too far from VWAP"
+                        f" ({_dist_vwap:.2%} > {_max_dist:.0%} for gap={_gap_pct:+.1f}%)")
                     return False
 
             # Guard 5: minimum ATR floor — 0.10% avoids truly dead stocks.
@@ -405,8 +414,7 @@ async def try_enter(symbol: str) -> bool:
             _atr_val = float(df["atr"].iloc[-1] or 0) if len(df) > 0 else 0.0
             _atr_pct = (_atr_val / _price_now) if _price_now > 0 else 0.0
             if _atr_pct < 0.001:
-                _log_debug_block(symbol, "gap_atr",
-                    f"[GAP DAY BLOCK] {symbol} | ATR too dead ({_atr_pct:.2%} < 0.10%)")
+                _log_debug_block(symbol, "gap_atr", f"[GAP DAY BLOCK] {symbol} | ATR too dead ({_atr_pct:.2%} < 0.10%)")
                 return False
 
             _signed_dist = (_price_now - _vwap_now) / _vwap_now if _vwap_now > 0 else 0.0
@@ -528,6 +536,15 @@ async def try_enter(symbol: str) -> bool:
         # V20.9n: floor matches CHOP gate floor — consistent behavior
         if ai_prob >= 0:
             ai_prob = max(ai_prob, 0.25)
+
+        # V20.14: Block floor-triggered trades in BULL regime — same threshold as
+        # CHOP gate (CHOP_AI_MIN_PROB=0.40). Floor lifts near-zero outputs to 0.25
+        # but 0.25 has no real edge. BEAR already has its own block above.
+        # This ensures all three regimes consistently reject floor-only signals.
+        if regime == "bull" and 0 <= ai_prob < CHOP_AI_MIN_PROB:
+            _log_debug_block(symbol, "bull_ai",
+                f"[BULL BLOCK] {symbol} | AI={ai_prob:.2%} < {CHOP_AI_MIN_PROB:.0%} required in BULL")
+            return False
 
         # V20.4: Hard block on fallback features stays — that's a real data quality fix.
         # V20.6: AI no longer hard-blocks on low probability.
