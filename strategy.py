@@ -2,7 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.14"
+MODULE_VERSION = "V20.15"
 # V20.9c: Gap Day ATR floor 0.20%→0.10% (ARM-type consolidation was blocked)
 # V20.9b: Gap fallback uses state[prev_close] — IEX vol-confirm was always failing
 # V20.8: Gap Day Mode — 5 guards with slow-EMA dist + normalized VWAP slope
@@ -208,14 +208,9 @@ async def try_enter(symbol: str) -> bool:
     _bear_mode = (regime == "bear")
     if _bear_mode:
         # V18.9: Controlled aggression — allow entries in bear but use scalp params
-        # V20.9h: Add AI check to bear mode — ai=0.00% entries were bypassing CHOP gate
-        #         and getting stopped out immediately on IEX wide spreads.
         # V20.14: Raised bear AI threshold from 0.05 → CHOP_AI_MIN_PROB (0.40).
         #         Floor lifts near-zero outputs to 0.25, so the old 0.05 check never
-        #         fired — floor-triggered trades (ai=25.00%) were entering freely in
-        #         BEAR just like they were in BULL. Now consistent with CHOP gate.
-        #         Apply AFTER floor (floor runs at line ~522) by checking the floored
-        #         value here: max(raw, 0.25) < CHOP_AI_MIN_PROB → block.
+        #         fired. floor-triggered trades (ai=25.00%) were entering in BEAR.
         if state.get("ai_trained"):
             _bear_ai = ai_predict_probability(build_feature_vector(symbol, get_indicators(symbol)))
             if _bear_ai >= 0:
@@ -537,13 +532,13 @@ async def try_enter(symbol: str) -> bool:
         if ai_prob >= 0:
             ai_prob = max(ai_prob, 0.25)
 
-        # V20.14: Block floor-triggered trades in BULL regime — same threshold as
-        # CHOP gate (CHOP_AI_MIN_PROB=0.40). Floor lifts near-zero outputs to 0.25
-        # but 0.25 has no real edge. BEAR already has its own block above.
-        # This ensures all three regimes consistently reject floor-only signals.
-        if regime == "bull" and 0 <= ai_prob < CHOP_AI_MIN_PROB:
-            _log_debug_block(symbol, "bull_ai",
-                f"[BULL BLOCK] {symbol} | AI={ai_prob:.2%} < {CHOP_AI_MIN_PROB:.0%} required in BULL")
+        # V20.14: Block floor-triggered trades in BULL regime.
+        # V20.15: Also block in UNKNOWN regime — at market open regime hasn't resolved
+        #         yet (stays "unknown" for ~2-3 min) so floor trades were slipping through.
+        #         unknown = treat conservatively like chop. BEAR has its own check above.
+        if regime in ("bull", "unknown") and 0 <= ai_prob < CHOP_AI_MIN_PROB:
+            _log_debug_block(symbol, f"{regime}_ai",
+                f"[{regime.upper()} BLOCK] {symbol} | AI={ai_prob:.2%} < {CHOP_AI_MIN_PROB:.0%} required in {regime.upper()}")
             return False
 
         # V20.4: Hard block on fallback features stays — that's a real data quality fix.
