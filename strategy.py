@@ -2,7 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.15"
+MODULE_VERSION = "V20.16"
 # V20.9c: Gap Day ATR floor 0.20%→0.10% (ARM-type consolidation was blocked)
 # V20.9b: Gap fallback uses state[prev_close] — IEX vol-confirm was always failing
 # V20.8: Gap Day Mode — 5 guards with slow-EMA dist + normalized VWAP slope
@@ -254,12 +254,12 @@ async def try_enter(symbol: str) -> bool:
 
         # Gate 1: AI confidence
         if _chop_ai >= 0 and _chop_ai < CHOP_AI_MIN_PROB:
-            log(f"[CHOP BLOCK] {symbol} | AI={_chop_ai:.2%} < {CHOP_AI_MIN_PROB:.0%} required in CHOP")
+            _log_debug_block(symbol, "chop_ai", f"[CHOP BLOCK] {symbol} | AI={_chop_ai:.2%} < {CHOP_AI_MIN_PROB:.0%} required in CHOP")
             return False
 
         # Gate 2: Scanner score (whitelist symbols with no detail are exempt)
         if detail and detail_score < CHOP_MIN_SCORE_STRICT:
-            log(f"[CHOP BLOCK] {symbol} | score={detail_score:.1f} < {CHOP_MIN_SCORE_STRICT:.0f} required in CHOP")
+            _log_debug_block(symbol, "chop_score", f"[CHOP BLOCK] {symbol} | score={detail_score:.1f} < {CHOP_MIN_SCORE_STRICT:.0f} required in CHOP")
             return False
 
         # Gate 3: Momentum strength (checked after indicators load below)
@@ -300,11 +300,11 @@ async def try_enter(symbol: str) -> bool:
         state.pop("_chop_strict_check", None)
         # Gate 3: Momentum strength
         if _intraday_str < CHOP_MOMENTUM_MIN:
-            log(f"[CHOP BLOCK] {symbol} | momentum={_intraday_str:.2f} < {CHOP_MOMENTUM_MIN:.2f} required in CHOP")
+            _log_debug_block(symbol, "chop_mom", f"[CHOP BLOCK] {symbol} | momentum={_intraday_str:.2f} < {CHOP_MOMENTUM_MIN:.2f} required in CHOP")
             return False
         # Gate 4: Volume spike mandatory
         if CHOP_VOLUME_REQUIRED and not _has_volume:
-            log(f"[CHOP BLOCK] {symbol} | no volume spike — required in CHOP")
+            _log_debug_block(symbol, "chop_vol", f"[CHOP BLOCK] {symbol} | no volume spike — required in CHOP")
             return False
         # Flag for size reduction
         state.setdefault("_chop_reduce", set()).add(symbol)
