@@ -1,7 +1,7 @@
 """
 websockets_handler.py — Market data WebSocket and order update WebSocket.
 """
-MODULE_VERSION = "V20.9j"
+MODULE_VERSION = "V20.17"
 import os, json, time, math, asyncio
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -494,6 +494,7 @@ async def order_updates_ws():
                                 "sector":         get_sector(symbol),
                                 "entry_features": order_meta.get("entry_features", []),
                                 "strategy":       order_meta.get("strategy", "momentum"),
+                                "entry_ts":       time.time(),   # V20.17: for settlement grace period
                             })
                             state["trades_today"] += 1
                             # FIX V14.3: track per-symbol trades

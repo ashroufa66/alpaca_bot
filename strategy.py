@@ -2,7 +2,7 @@
 strategy.py — Entry logic (momentum + VWAP), exit logic, partial exits,
                position sizing, smart execution.
 """
-MODULE_VERSION = "V20.16"
+MODULE_VERSION = "V20.17"
 # V20.9c: Gap Day ATR floor 0.20%→0.10% (ARM-type consolidation was blocked)
 # V20.9b: Gap fallback uses state[prev_close] — IEX vol-confirm was always failing
 # V20.8: Gap Day Mode — 5 guards with slow-EMA dist + normalized VWAP slope
@@ -772,9 +772,20 @@ async def try_exit(symbol: str) -> bool:
         from broker import get_alpaca_position_qty
         alpaca_qty = await get_alpaca_position_qty(symbol)
         if alpaca_qty <= 0:
-            log(f"[SELL GUARD] {symbol}: Alpaca qty={alpaca_qty} ≤ 0 — refusing sell (would create short)")
-            await del_position(symbol)
-            await discard_pending_symbol(symbol)
+            # V20.17: Don't remove position if it was entered recently — a 404 or
+            # qty=0 from Alpaca within ~10 min of entry is paper settlement delay,
+            # not a genuinely missing position. Removing it caused re-entry loops
+            # (HOOD entered 3x today: filled → 404 → del_position → Pos=0 → re-entry).
+            # Only del_position if entry was >10 min ago (genuine ghost position).
+            _entry_ts = state["positions"].get(symbol, {}).get("entry_ts", 0)
+            _age_secs = time.time() - _entry_ts if _entry_ts else 9999
+            if _age_secs < 600:   # < 10 minutes — settlement delay, keep position
+                log(f"[SELL GUARD] {symbol}: Alpaca qty={alpaca_qty} ≤ 0 but entry was "
+                    f"{_age_secs:.0f}s ago — paper settlement delay, keeping position")
+            else:
+                log(f"[SELL GUARD] {symbol}: Alpaca qty={alpaca_qty} ≤ 0 — refusing sell (would create short)")
+                await del_position(symbol)
+                await discard_pending_symbol(symbol)
             return False
         qty = min(qty, alpaca_qty)   # never sell more than Alpaca says we own
 
