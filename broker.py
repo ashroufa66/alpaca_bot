@@ -1,7 +1,13 @@
 """
 broker.py — Alpaca REST API helpers, sector map, utility functions.
 """
-MODULE_VERSION = "V20.9m"
+MODULE_VERSION = "V20.9n"
+# V20.9n: Ghost-close outcomes (RECONCILE/STALE POS/sync_positions removals) now
+# persisted to trade_history/ai_trades/kelly_samples instead of only being
+# stashed in state["sync_close_outcomes"], which nothing ever read. Previously
+# every ghost-cleared position (paper-settlement 403 -> Alpaca shows no
+# position) vanished from bot state with zero record of its outcome, so those
+# trades were silently excluded from win-rate/Kelly stats and AI training data.
 # V20.5: Restore uses qty_available (settled shares) not qty (total) — fixes 403 sell loops
 # V20.0: REST fallback price fetch for IEX bar droughts
 # V18.6 fixes (last 5%):
@@ -10,7 +16,7 @@ MODULE_VERSION = "V20.9m"
 #   3. market_is_open — always calls get_clock() for holidays/half-days; never local-only
 #   4. Latency-aware execution — orders blocked when latency >= LATENCY_FREEZE_MS
 #   5. Emergency position kill — Alpaca bulk-close when circuit opens with open positions
-print(f"[BROKER] V20.9m loaded — orphan 403 backoff (3 strikes → 5 min quiet) | EOD sync block | market-hours guard | skip short | circuit breaker | short EOD close | hard sell guard | qty_available restore")
+print(f"[BROKER] V20.9n loaded — orphan 403 backoff (3 strikes → 5 min quiet) | EOD sync block | market-hours guard | skip short | circuit breaker | short EOD close | hard sell guard | qty_available restore | ghost-close outcome recording")
 # V19.9: EOD sync block flag — set by force_close_all_eod(), cleared at midnight
 _eod_close_done = False
 
@@ -21,6 +27,53 @@ _orphan_403_counts: dict = {}   # symbol -> consecutive 403 count
 _orphan_403_backoff_until: dict = {}  # symbol -> backoff-until timestamp
 ORPHAN_403_MAX_BEFORE_BACKOFF = 3
 ORPHAN_403_BACKOFF_SECS = 300  # 5 minutes
+
+
+def _record_ghost_close_outcome(symbol: str, pos: dict, exit_price: float, reason: str = "ghost_close") -> None:
+    """
+    V20.9n: Persist an outcome for a position that disappeared from Alpaca
+    without ever going through a bot-managed sell fill (paper-settlement
+    ghost clears from STALE POS / sync_positions / RECONCILE).
+
+    Previously these outcomes were only written to
+    state["sync_close_outcomes"], a dict nothing downstream consumed — so
+    ghost-cleared trades never reached trade_history, ai_trades, or
+    kelly_samples. That means the 24.7% win-rate / Kelly W-L stats are
+    undercounting: some real outcomes (win or loss) are simply missing.
+
+    exit_price here is an ESTIMATE (last known bid/ask, not a real fill),
+    so this is flagged in trade_history via signal_factors.estimated_exit.
+    """
+    try:
+        entry = float(pos.get("entry_price", 0) or 0)
+        qty = int(pos.get("qty", 1) or 1)
+        if entry <= 0 or qty <= 0 or exit_price <= 0:
+            return
+        pnl = (exit_price - entry) * qty
+        strategy = pos.get("strategy", "unknown")
+        features = pos.get("entry_features", []) or []
+        stop_price = float(pos.get("stop_price", 0) or 0)
+        # Fall back to configured HARD_STOP (0.8%) if no stop was recorded
+        risk_per_share = abs(entry - stop_price) if stop_price > 0 else entry * 0.008
+        risk = risk_per_share * qty
+        pnl_r = (pnl / risk) if risk > 0 else 0.0
+        label = 1 if pnl > 0 else 0
+
+        from database import (
+            supa_save_trade_history as _sth,
+            supa_save_trade as _st,
+            supa_save_kelly as _sk,
+        )
+        _sth(symbol, entry, exit_price, qty, pnl, strategy,
+             {"exit_reason": reason, "estimated_exit": True})
+        _st(symbol, features, label, pnl)
+        _sk(pnl > 0, pnl_r)
+        log(f"[GHOST OUTCOME] {symbol}: recorded pnl={pnl:.2f} (label={label}, pnl_r={pnl_r:.2f}, "
+            f"est_exit={exit_price:.2f}, reason={reason}) to trade_history/ai_trades/kelly_samples")
+    except Exception as e:
+        log(f"[GHOST OUTCOME] {symbol}: failed to record outcome — {e}")
+
+
 #print(f"[BROKER] REPLACED — global clock cache 60s | circuit breaker | latency gate | emergency kill | stale blacklist fix")
 import os, json, time, math, asyncio, csv
 from collections import deque
@@ -628,6 +681,7 @@ async def async_submit_limit_order(symbol: str, qty: int, side: str,
                 _last_px = float(_last_q.get("bid", 0) or _last_q.get("ask", 0) or _entry)
                 _qty = int(_pos.get("qty", 1) or 1)
                 state.setdefault("sync_close_outcomes", {})[symbol] = (_last_px - _entry) * _qty
+                _record_ghost_close_outcome(symbol, _pos, _last_px, reason="stale_pos_limit_sell_403")
             await del_position(symbol)
             state.setdefault("stale_pos_blacklist", {})[symbol] = time.time()  # V19.1
             try:
@@ -694,6 +748,7 @@ async def async_submit_market_order(symbol: str, qty: int, side: str) -> Optiona
                 _last_px = float(_last_q.get("bid", 0) or _last_q.get("ask", 0) or _entry)
                 _qty = int(_pos.get("qty", 1) or 1)
                 state.setdefault("sync_close_outcomes", {})[symbol] = (_last_px - _entry) * _qty
+                _record_ghost_close_outcome(symbol, _pos, _last_px, reason="stale_pos_market_sell_403")
             await del_position(symbol)
             state.setdefault("stale_pos_blacklist", {})[symbol] = time.time()  # V19.1
             try:
@@ -957,6 +1012,7 @@ async def sync_positions():
                     _estimated_pnl = (_last_price - _entry) * _qty
                     log(f"[SYNC CLOSE] {sym}: pnl≈{_estimated_pnl:.2f} (entry={_entry:.2f} last={_last_price:.2f})")
                     state.setdefault("sync_close_outcomes", {})[sym] = _estimated_pnl
+                    _record_ghost_close_outcome(sym, _pos, _last_price, reason="sync_positions_ghost")
                 await del_position(sym)
     except Exception as e:
         log(f"Position sync error: {e}")
