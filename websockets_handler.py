@@ -1,7 +1,15 @@
 """
 websockets_handler.py — Market data WebSocket and order update WebSocket.
 """
-MODULE_VERSION = "V20.17"
+MODULE_VERSION = "V20.18"
+# V20.18: FIX — candidate-list drift under 8 symbols updated `last_subscribed`
+# locally without ever sending Alpaca a new subscribe message. This meant
+# symbols added later (e.g. LARGE_CAP_WHITELIST injected by the scanner
+# after the WS's initial connect) silently never received live quotes/bars
+# for the rest of the session — the "HALT suspected: no fresh bar" storm
+# on AAPL/MSFT/NVDA/TSLA/etc. all day 2026-07-09 traced back to this.
+# Now: any newly-added symbol gets an immediate incremental subscribe.
+# Full reconnect is reserved for trimming large accumulated drift only.
 import os, json, time, math, asyncio
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -181,26 +189,49 @@ async def market_data_ws():
                 while True:
                     new_syms = sorted(set(state["scanner_candidates"] + ["SPY", "QQQ"]))
                     if new_syms and new_syms != last_subscribed:
+                        added   = set(new_syms) - set(last_subscribed)
+                        removed = set(last_subscribed) - set(new_syms)
+
                         if not await market_is_open():
-                            # Market closed — update silently, no reconnect needed
+                            # Market closed — update tracking silently, no live sub needed
                             last_subscribed = new_syms
                         else:
-                            secs_since_ws_start = time.time() - _ws_start_time
+                            secs_since_ws_start  = time.time() - _ws_start_time
                             secs_since_reconnect = time.time() - state.get("ws_last_reconnect", 0)
-                            added   = set(new_syms) - set(last_subscribed)
-                            removed = set(last_subscribed) - set(new_syms)
-                            # V17.8: only reconnect if:
-                            # 1. WS has been running >60s (startup grace period)
-                            # 2. Last reconnect was >30s ago (debounce)
-                            # 3. 8+ symbols changed (meaningful drift, not incremental updates)
+
+                            # V20.18 FIX: previously, drift under 8 symbols only
+                            # updated `last_subscribed` locally WITHOUT telling
+                            # Alpaca — newly-added symbols (e.g. large-cap
+                            # whitelist injected by the scanner post-connect)
+                            # silently never got live bars. Now: send a real
+                            # incremental subscribe for any newly-added symbols
+                            # immediately, every cycle, regardless of size.
+                            if added:
+                                try:
+                                    await ws.send(json.dumps({
+                                        "action": "subscribe",
+                                        "quotes": sorted(added),
+                                        "bars":   sorted(added),
+                                    }))
+                                    _added_list = sorted(added)
+                                    log(f"Subscribed (incremental, +{len(added)}): "
+                                        f"{', '.join(_added_list[:12])}"
+                                        f"{' ...' if len(_added_list) > 12 else ''}")
+                                except Exception as e:
+                                    log(f"Incremental subscribe failed: {e}")
+
+                            # Full reconnect is now purely for trimming a large
+                            # accumulated subscription list (bloat control) —
+                            # NOT a gate on whether new symbols get live data.
                             if (secs_since_ws_start > 60
                                     and secs_since_reconnect > 30
-                                    and len(added) + len(removed) >= 8):
-                                log(f"Candidate list changed ({len(added)} added, {len(removed)} removed) — reconnecting...")
+                                    and len(added) + len(removed) >= 30):
+                                log(f"Candidate list drifted heavily ({len(added)} added, "
+                                    f"{len(removed)} removed) — reconnecting to trim subscription...")
                                 break
-                            elif new_syms != last_subscribed:
-                                # Update our tracking but don't reconnect yet
-                                last_subscribed = new_syms
+
+                            last_subscribed = new_syms
+                            state["ws_symbols"] = new_syms[:]
 
                     # V16.7: recv timeout raised 30→45s — quiet periods are normal,
                     # don't reconnect just because no quote arrived for 30s
