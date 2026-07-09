@@ -1,7 +1,16 @@
 """
 loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V20.9l"
+MODULE_VERSION = "V20.9m"
+# V20.9m: FIX — position_reconciliation_loop's ghost-clear (the [RECONCILE]
+# "bot has position, Alpaca does not — removing ghost" path) deleted the
+# position with ZERO outcome recorded anywhere: no trade_history row, no
+# AI training sample, no Kelly sample. This is the actual function behind
+# the ghost-clears traced through broker.py/database.py on 2026-07-08/09 —
+# broker.py's V20.9n fix targeted sync_positions() by mistake; that's a
+# different, rarely-hit path. This is the one that fires in production
+# (every 5 min via position_reconciliation_loop). Now calls
+# broker._record_ghost_close_outcome() before deleting the position.
 # V19.5 fixes:
 #   1. position_reconciliation_loop — every 5 min, compares state["positions"]
 #      against Alpaca's actual positions. Auto-removes ghosts (qty=0 in Alpaca).
@@ -31,7 +40,7 @@ from broker import (log, refresh_account, sync_positions,
                      emergency_close_all_positions, _cb,
                      async_get_positions, async_submit_market_order,
                      close_all_shorts_eod,
-                     now_et)
+                     now_et, _record_ghost_close_outcome)
 from models import (ai_train_model, vwap_train_model,
                     calc_kelly_fraction, get_drawdown_pct,
                     get_avg_latency_ms, measure_latency,
@@ -308,6 +317,13 @@ async def position_reconciliation_loop():
                             for symbol in ghosts:
                                 log(f"[RECONCILE] {symbol}: bot has position, "
                                     f"Alpaca does not — removing ghost")
+                                _pos = state["positions"].get(symbol, {})
+                                _entry = float(_pos.get("entry_price", 0) or 0)
+                                if _entry > 0:
+                                    _q = state["quotes"].get(symbol, {})
+                                    _last_px = float(_q.get("bid", 0) or _q.get("ask", 0) or _entry)
+                                    _record_ghost_close_outcome(symbol, _pos, _last_px,
+                                                                 reason="reconcile_ghost")
                                 await del_position(symbol)
                                 state.get("orphan_positions", set()).discard(symbol)
                                 supa_delete_open_position(symbol)
