@@ -1,16 +1,20 @@
 """
 loops_v19.py — All async background loops + main entrypoint.
 """
-MODULE_VERSION = "V20.9m"
-# V20.9m: FIX — position_reconciliation_loop's ghost-clear (the [RECONCILE]
-# "bot has position, Alpaca does not — removing ghost" path) deleted the
-# position with ZERO outcome recorded anywhere: no trade_history row, no
-# AI training sample, no Kelly sample. This is the actual function behind
-# the ghost-clears traced through broker.py/database.py on 2026-07-08/09 —
-# broker.py's V20.9n fix targeted sync_positions() by mistake; that's a
-# different, rarely-hit path. This is the one that fires in production
-# (every 5 min via position_reconciliation_loop). Now calls
-# broker._record_ghost_close_outcome() before deleting the position.
+MODULE_VERSION = "V20.9n"
+# V20.9n: FIX — force_close_all_eod()'s Step 1 called Alpaca's account-wide
+# bulk close (DELETE /v2/positions) with no symbol/asset-class filter.
+# Alpaca's API has NO way to scope that call — it liquidates every long and
+# short position in the account, period. Since the crypto bot shares this
+# same Alpaca paper account, every EOD wall (12:44 PT) was silently closing
+# the crypto bot's BTC/DOGE/SOL positions too — confirmed 2026-07-17 when
+# all 3 crypto positions closed simultaneously at exactly 12:44 PT with no
+# corresponding action from the crypto bot itself.
+# Fix: removed the bulk-close step. Step 3 (per-symbol close, already
+# scoped to `positions` = this bot's own tracked equity symbols) is the
+# sole close mechanism now — it was already robust enough to be the
+# documented "fallback" for orphaned/unsettled positions, so it can safely
+# be the only path.
 # V19.5 fixes:
 #   1. position_reconciliation_loop — every 5 min, compares state["positions"]
 #      against Alpaca's actual positions. Auto-removes ghosts (qty=0 in Alpaca).
@@ -347,15 +351,22 @@ async def position_reconciliation_loop():
 # This caused SOFI to stay open past market close.
 #
 # Fix: force_close_all_eod() bypasses the orphan guard by:
-# 1. Attempting individual market sells for each position
-# 2. Using Alpaca's bulk-close endpoint as a guaranteed fallback
+# 1. Cancelling pending orders per symbol
+# 2. Checking live qty, then closing per-symbol (V20.9n: no longer uses
+#    Alpaca's account-wide bulk-close — it has no filter and was also
+#    closing the separate crypto bot's positions on the same account)
 # 3. Clearing bot state regardless of sell result
 # =========================================================
 
 async def force_close_all_eod():
     """
-    V20.9h: EOD force-close — bulk DELETE first, then per-symbol fallback
-    for any positions still open (unsettled paper positions survive bulk DELETE).
+    V20.9n: EOD force-close — per-symbol close only, scoped to this bot's
+    own tracked positions. The old bulk DELETE /v2/positions step was
+    removed: it closes the ENTIRE account with no filter, which was also
+    closing the separate crypto bot's positions since they share this
+    Alpaca account. The per-symbol path below was already robust enough
+    (cancels orders, checks live qty, then closes) to be the sole
+    mechanism — no bulk fallback needed.
     """
     positions = list(state["positions"].keys())
 
@@ -371,28 +382,8 @@ async def force_close_all_eod():
 
     session = state.get("http_session")
 
-    # Step 1: Alpaca bulk-close — closes settled positions
-    try:
-        if session:
-            async with session.delete(
-                f"{TRADE_BASE_URL}/v2/positions",
-                headers=HEADERS
-            ) as resp:
-                if resp.status in (200, 207):
-                    log(f"[EOD] ✅ Alpaca bulk-close confirmed "
-                        f"(status={resp.status})")
-                else:
-                    body = await resp.text()
-                    log(f"[EOD] Bulk-close status={resp.status}: {body[:100]}")
-    except Exception as e:
-        log(f"[EOD] Bulk-close error: {e}")
-
-    # Step 2: Wait for fills to settle
-    log("[EOD] Waiting 8s for Alpaca fills to settle...")
-    await asyncio.sleep(8)
-
-    # Step 3: Per-symbol fallback — catches unsettled orphan positions that
-    # survive bulk DELETE on paper trading (qty_available=0 but qty=1).
+    # Step 1: Per-symbol close — cancel pending orders, verify live qty,
+    # then close. This is the only close mechanism now (see V20.9n above).
     # V20.9i: Cancel any pending orders first — "held_for_orders" blocks close.
     if session:
         for symbol in positions:
@@ -413,20 +404,21 @@ async def force_close_all_eod():
         for symbol in positions:
             try:
                 # V20.9k: Check current qty BEFORE per-symbol DELETE.
-                # If bulk DELETE already closed the long, qty=0 or missing.
-                # Firing DELETE on a closed position creates a short sell — bug.
+                # It may already be closed (e.g. a TP/SL exit fired between
+                # the EOD trigger and this loop) — firing DELETE on an
+                # already-closed position creates a short sell, which is a bug.
                 async with session.get(
                     f"{TRADE_BASE_URL}/v2/positions/{symbol}",
                     headers=HEADERS
                 ) as check_resp:
                     if check_resp.status == 404:
-                        log(f"[EOD] {symbol} already closed by bulk DELETE — skipping per-symbol")
+                        log(f"[EOD] {symbol} already closed — skipping")
                         continue
                     if check_resp.status == 200:
                         check_data = await check_resp.json()
                         current_qty = float(check_data.get("qty", 0))
                         if current_qty <= 0:
-                            log(f"[EOD] {symbol} qty={current_qty} after bulk close — skipping per-symbol")
+                            log(f"[EOD] {symbol} qty={current_qty} — skipping")
                             continue
 
                 async with session.delete(
