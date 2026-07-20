@@ -1,7 +1,18 @@
 """
 broker.py — Alpaca REST API helpers, sector map, utility functions.
 """
-MODULE_VERSION = "V20.9n"
+MODULE_VERSION = "V20.9o"
+# V20.9o: FIX — sync_positions() was crashing on `int(qty_available)` for
+# crypto positions (Alpaca returns fractional qty_available strings like
+# "2721.682024047" for crypto; int() on that raises ValueError). Root cause
+# is the same shared-Alpaca-account issue as the V20.9n EOD bulk-close bug:
+# the crypto bot's positions show up in this equity bot's /v2/positions
+# call too. Fixing just the int() parse wasn't enough — even if it
+# succeeded, this function would go on to fully adopt the crypto position
+# into state["positions"] with meaningless equity-style placeholder TP/SL,
+# making it visible to this bot's own EOD close logic later. Now filters
+# out any non-equity (asset_class != "us_equity") position before doing
+# any parsing at all — never touches it, never tracks it.
 # V20.9n: Ghost-close outcomes (RECONCILE/STALE POS/sync_positions removals) now
 # persisted to trade_history/ai_trades/kelly_samples instead of only being
 # stashed in state["sync_close_outcomes"], which nothing ever read. Previously
@@ -16,7 +27,7 @@ MODULE_VERSION = "V20.9n"
 #   3. market_is_open — always calls get_clock() for holidays/half-days; never local-only
 #   4. Latency-aware execution — orders blocked when latency >= LATENCY_FREEZE_MS
 #   5. Emergency position kill — Alpaca bulk-close when circuit opens with open positions
-print(f"[BROKER] V20.9n loaded — orphan 403 backoff (3 strikes → 5 min quiet) | EOD sync block | market-hours guard | skip short | circuit breaker | short EOD close | hard sell guard | qty_available restore | ghost-close outcome recording")
+print(f"[BROKER] V20.9o loaded — orphan 403 backoff (3 strikes → 5 min quiet) | EOD sync block | market-hours guard | skip short | circuit breaker | short EOD close | hard sell guard | qty_available restore | ghost-close outcome recording | crypto position filter")
 # V19.9: EOD sync block flag — set by force_close_all_eod(), cleared at midnight
 _eod_close_done = False
 
@@ -916,6 +927,14 @@ async def sync_positions():
 
         for p in broker_positions:
             sym   = p["symbol"]
+            # V20.9o: skip anything that isn't an equity position. The
+            # crypto bot shares this same Alpaca account, so its positions
+            # (e.g. "DOGEUSD") show up in this same /v2/positions response.
+            # Crypto qty/qty_available are fractional strings that break
+            # int() parsing below, and even if parsed, this bot has no
+            # business tracking or managing a crypto position.
+            if p.get("asset_class", "us_equity") != "us_equity":
+                continue
             broker_symbols.add(sym)
             qty   = math.floor(float(p["qty"]))
             entry = float(p["avg_entry_price"])
@@ -975,7 +994,7 @@ async def sync_positions():
                 # If qty_available < qty, shares are unsettled — use available qty
                 # for the position so sells don't 403. If qty_available == 0,
                 # mark as orphan so watchdog manages via EOD close only.
-                qty_available = int(alpaca_pos.get("qty_available", qty) or qty)
+                qty_available = int(float(alpaca_pos.get("qty_available", qty) or qty))
                 if qty_available <= 0:
                     log(f"[RESTORE SKIP QTY] {sym}: qty={qty} but available=0 — shares unsettled, marking orphan")
                     state.setdefault("orphan_positions", set()).add(sym)
